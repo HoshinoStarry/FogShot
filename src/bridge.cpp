@@ -1,17 +1,22 @@
 #include "bridge.h"
 
+#include "extra_video.h"
 #include "media.h"
+#include "rc/platform.h"
 #include "session.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -23,7 +28,7 @@ using nlohmann::json;
 
 namespace {
 
-enum class CommandKind { Connect, Disconnect, Display, Mute, Text, Remote, Pointer, Button, Wheel, Key, Release };
+enum class CommandKind { Connect, Disconnect, Display, Mute, Text, Remote, Settings, Microphone, Pointer, Button, Wheel, Key, Release };
 
 struct Command {
     CommandKind kind;
@@ -39,6 +44,51 @@ struct FrameData {
     std::vector<uint8_t> pixels;
 };
 
+struct Average {
+    std::optional<double> value;
+    void observe(double sample) {
+        if (std::isfinite(sample) && sample >= 0 && sample <= 5000) {
+            const auto previous = value.value_or(sample);
+            value = previous + (sample - previous) * 0.2;
+        }
+    }
+};
+
+struct VideoStream {
+    explicit VideoStream(const rincast::StreamConfig& stream) : config(stream) {}
+    rincast::StreamConfig config;
+    rincast::Media decoder;
+    std::unique_ptr<rincast::ExtraVideoDecoder> extra;
+    uint64_t framesThisSecond = 0;
+    Average decode, captureEncode, downlink, total;
+
+    bool initialize() {
+        if (config.codec == rc::VideoCodec::H264) return decoder.Initialize(false);
+        if (config.codec == rc::VideoCodec::AV1) {
+            extra = rincast::ExtraVideoDecoder::Create(rincast::ExtraVideoCodec::AV1, config.ten_bit);
+        }
+        return bool(extra);
+    }
+    int width() const { return extra ? extra->VideoWidth() : decoder.VideoWidth(); }
+    int height() const { return extra ? extra->VideoHeight() : decoder.VideoHeight(); }
+    bool picture(const std::vector<uint8_t>& bitstream) {
+        return extra ? extra->Decode(bitstream.data(), bitstream.size())
+                     : decoder.DecodeVideo(bitstream.data(), bitstream.size());
+    }
+    std::vector<uint8_t> take() { return extra ? extra->TakeVideoPixels() : decoder.TakeVideoPixels(); }
+};
+
+double differenceMs(int64_t end, int64_t start) { return (double(end) - double(start)) / 1e6; }
+
+const char* codecName(rc::VideoCodec codec) {
+    switch (codec) {
+        case rc::VideoCodec::H264: return "H.264";
+        case rc::VideoCodec::HEVC: return "HEVC";
+        case rc::VideoCodec::AV1: return "AV1";
+    }
+    return "";
+}
+
 rincast::SessionConfig makeConfig(const char* directory, const char* platform, bool mobile) {
     rincast::SessionConfig config;
     config.device_name = std::string("FogShot (") + platform + ")";
@@ -46,8 +96,11 @@ rincast::SessionConfig makeConfig(const char* directory, const char* platform, b
     config.settings["desktopFps"] = mobile ? 30 : 60;
     config.decoders["maxWidth"] = mobile ? 1920 : 2560;
     config.decoders["maxHeight"] = mobile ? 1920 : 2560;
-#ifdef RINCAST_DISABLE_DISCOVERY
-    config.discover = false;
+    const auto extra = rincast::ProbeExtraVideo();
+    config.decoders["av1"] = extra.av1_8bit;
+    config.decoders["av110"] = extra.av110bit;
+#ifdef RINCAST_UNICAST_DISCOVERY
+    config.unicast_discovery = true;
 #endif
     const auto keyFile = std::filesystem::u8path(directory) / "identity.key";
     rc::crypto::IdentitySeed seed{};
@@ -82,7 +135,7 @@ struct RcdClient {
             } catch (const std::exception& error) {
                 std::lock_guard lock(mutex);
                 state = json{{"state", 4}, {"status", error.what()}}.dump(-1, ' ', false, json::error_handler_t::replace);
-                frame.reset();
+                frames.clear();
             }
         });
     }
@@ -108,7 +161,7 @@ struct RcdClient {
     std::mutex mutex;
     std::condition_variable wake;
     std::vector<Command> commands;
-    std::shared_ptr<const FrameData> frame;
+    std::map<uint8_t, std::shared_ptr<const FrameData>> frames;
     std::string state = R"({"state":0,"status":"Starting client..."})";
     std::atomic<bool> stopping = false;
     std::thread worker;
@@ -116,38 +169,73 @@ struct RcdClient {
 
 void RcdClient::run(rincast::SessionConfig config) {
     const bool discover = config.discover;
-    rincast::Media media;
-    if (!media.Initialize()) throw std::runtime_error("Could not initialize the H.264 decoder");
+    const auto defaultWidth = config.decoders.value("maxWidth", 2560u);
+    const auto defaultHeight = config.decoders.value("maxHeight", 2560u);
+    const bool av1 = config.decoders.value("av1", false), av1TenBit = config.decoders.value("av110", false);
+    const auto codecs = av1 ? json::array({"h264", "av1"}) : json::array({"h264"});
+    rincast::Media audio;
+    if (!audio.Initialize()) throw std::runtime_error("Could not initialize media");
     rincast::Session session(std::move(config));
+    std::map<uint8_t, VideoStream> video;
     std::string monitorId, notice;
-    uint8_t streamId = 0;
-    uint64_t sequence = 0, generation = 0, decoded = 0, audioPackets = 0;
-    bool dirty = true;
+    uint8_t focus = 0;
+    uint64_t sequence = 0, generation = 0, decoded = 0, audioPackets = 0, lastRxBytes = 0;
+    bool showAll = false, microphone = false, micSettingsDirty = false, dirty = true;
+    std::vector<uint8_t> micPacket;
+    json network = json::object();
+
     const auto clearVideo = [&] {
-        media.Reset();
+        video.clear();
+        focus = 0;
         ++generation;
+        network = json::object();
         dirty = true;
         std::lock_guard lock(mutex);
-        frame.reset();
+        frames.clear();
     };
-    const auto select = [&](const std::string& id) {
-        if (monitorId == id || !session.select_monitors({id})) return;
+    const auto setMic = [&](bool enabled) {
+        if (enabled && !session.connected()) return;
+        if (microphone == enabled) return;
+        if (enabled) {
+            microphone = audio.StartMicrophone();
+            notice = microphone ? "" : "无法打开此设备的麦克风。";
+        } else {
+            audio.StopMicrophone();
+            microphone = false;
+        }
+        session.update_settings({{"micPassthrough", microphone}});
+        dirty = true;
+    };
+    const auto select = [&](const std::string& id, bool all) {
+        if (showAll == all && monitorId == id) return;
+        std::vector<std::string> selected;
+        if (!all) selected.push_back(id);
+        if (!session.select_monitors(selected)) return;
         session.release_controls();
+        showAll = all;
         monitorId = id;
-        streamId = 0;
         clearVideo();
     };
 
     rincast::Session::Callbacks callbacks;
     callbacks.on_state = [&](rincast::Session::State status, const std::string&) {
         dirty = true;
-        if (status != rincast::Session::State::Connected && (streamId != 0 || !monitorId.empty())) {
-            streamId = 0;
-            monitorId.clear();
-            notice.clear();
-            decoded = 0;
-            audioPackets = 0;
-            clearVideo();
+        if (status != rincast::Session::State::Connected) {
+            if (microphone) {
+                audio.StopMicrophone();
+                microphone = false;
+                micSettingsDirty = true;
+            }
+            if (!video.empty() || !monitorId.empty() || showAll) {
+                monitorId.clear();
+                showAll = false;
+                notice.clear();
+                decoded = 0;
+                audioPackets = 0;
+                lastRxBytes = 0;
+                audio.Reset();
+                clearVideo();
+            }
         }
     };
     callbacks.on_control = [&](const json& message) {
@@ -159,29 +247,59 @@ void RcdClient::run(rincast::SessionConfig config) {
     };
     callbacks.on_monitors = [&](const auto&) { dirty = true; };
     callbacks.on_stream_config = [&](const std::vector<rincast::StreamConfig>& streams) {
-        const auto matching = std::find_if(streams.begin(), streams.end(), [&](const auto& it) {
-            return it.monitor_id == monitorId || (it.monitor_id.empty() && streams.size() == 1);
-        });
-        streamId = matching == streams.end() ? 0 : matching->stream_id;
         clearVideo();
+        for (const auto& stream : streams) {
+            VideoStream receiver(stream);
+            if (receiver.initialize()) {
+                video.emplace(stream.stream_id, std::move(receiver));
+            } else {
+                notice = std::string("无法初始化视频解码器 ") + codecName(stream.codec);
+            }
+        }
+        const auto preferred = std::find_if(video.begin(), video.end(), [&](const auto& entry) {
+            return entry.second.config.monitor_id == monitorId;
+        });
+        if (!video.empty()) focus = preferred != video.end() ? preferred->first : video.begin()->first;
     };
     callbacks.on_video = [&](rc::ReceivedFrame&& received) {
-        if (received.streamId != streamId || !media.DecodeVideo(received.bitstream.data(), received.bitstream.size()))
-            return false;
-        auto latest = std::make_shared<FrameData>(FrameData{++sequence, generation, uint32_t(media.VideoWidth()),
-                                                           uint32_t(media.VideoHeight()), media.TakeVideoPixels()});
+        const auto it = video.find(received.streamId);
+        if (it == video.end()) return false;
+        auto& stream = it->second;
+        const int64_t start = rc::NowNs();
+        if (!stream.picture(received.bitstream)) return stream.extra && stream.extra->LastError().empty();
+        const int64_t end = rc::NowNs();
+        stream.decode.observe(differenceMs(end, start));
+        if (received.metadata.size() >= sizeof(rc::DesktopFrameMetadata)) {
+            rc::DesktopFrameMetadata metadata{};
+            std::memcpy(&metadata, received.metadata.data(), sizeof(metadata));
+            if (metadata.pcCaptureNs > 0 && metadata.pcEncodeEndNs >= metadata.pcCaptureNs) {
+                stream.captureEncode.observe(differenceMs(metadata.pcEncodeEndNs, metadata.pcCaptureNs));
+                const auto health = session.health();
+                if (health.clock_synchronized) {
+                    const auto transport = differenceMs(received.completeNs, metadata.pcEncodeEndNs) +
+                                           double(health.clock_offset_ns) / 1e6;
+                    stream.downlink.observe(transport);
+                    const auto total = differenceMs(end, metadata.pcCaptureNs) + double(health.clock_offset_ns) / 1e6;
+                    stream.total.observe(total);
+                }
+            }
+        }
+        auto latest = std::make_shared<FrameData>(FrameData{++sequence, generation, uint32_t(stream.width()),
+                                                           uint32_t(stream.height()), stream.take()});
         if (latest->pixels.empty()) return false;
+        ++stream.framesThisSecond;
         ++decoded;
         std::lock_guard lock(mutex);
-        frame = std::move(latest);
+        frames[received.streamId] = std::move(latest);
         return true;
     };
     callbacks.on_audio = [&](const rc::AudioPacketHeader&, const uint8_t* packet, size_t size) {
-        if (media.DecodeOpus(packet, size)) ++audioPackets;
+        if (audio.DecodeOpus(packet, size)) ++audioPackets;
     };
     session.set_callbacks(std::move(callbacks));
 
     auto nextState = std::chrono::steady_clock::now();
+    auto lastSample = nextState;
     std::vector<Command> pending;
     while (!stopping) {
         {
@@ -193,20 +311,57 @@ void RcdClient::run(rincast::SessionConfig config) {
         }
         for (const auto& command : pending) {
             switch (command.kind) {
-                case CommandKind::Connect: session.connect(command.text); break;
-                case CommandKind::Disconnect: session.cancel(); break;
+                case CommandKind::Connect: setMic(false); session.connect(command.text); break;
+                case CommandKind::Disconnect: setMic(false); session.cancel(); break;
                 case CommandKind::Display:
-                    if (std::any_of(session.monitors().begin(), session.monitors().end(),
-                                    [&](const auto& monitor) { return monitor.id == command.text; })) select(command.text);
+                    if (command.down) select({}, true);
+                    else if (std::any_of(session.monitors().begin(), session.monitors().end(),
+                                         [&](const auto& monitor) { return monitor.id == command.text; })) {
+                        select(command.text, false);
+                    }
                     break;
-                case CommandKind::Mute: media.SetMuted(command.down); break;
+                case CommandKind::Mute: audio.SetMuted(command.down); break;
                 case CommandKind::Text: session.text(command.text); break;
                 case CommandKind::Remote: {
                     const auto offer = json::parse(command.text, nullptr, false);
-                    if (offer.is_object()) session.connect_remote(offer);
+                    if (offer.is_object()) {
+                        setMic(false);
+                        session.connect_remote(offer);
+                    }
                     break;
                 }
-                case CommandKind::Pointer: if (streamId) session.pointer(streamId, command.x, command.y); break;
+                case CommandKind::Settings: {
+                    const auto settings = json::parse(command.text, nullptr, false);
+                    if (!settings.is_object()) break;
+                    json wire = json::object();
+                    for (const auto* name : {"desktopFps", "desktopBitrateMbps", "adaptiveBitrate", "streamAudio", "codec"}) {
+                        if (settings.contains(name)) wire[name] = settings[name];
+                    }
+                    wire["tenBit"] = av1TenBit && settings.contains("tenBit") && settings["tenBit"] == true &&
+                                     (!wire.contains("codec") || wire["codec"] != "h264");
+                    if (settings.contains("volume") && settings["volume"].is_number()) audio.SetVolume(settings["volume"].get<float>());
+                    if (settings.contains("maxDecodeWidth") && settings["maxDecodeWidth"].is_number_integer() &&
+                        settings.contains("maxDecodeHeight") && settings["maxDecodeHeight"].is_number_integer()) {
+                        const auto width = settings["maxDecodeWidth"].get<int>();
+                        const auto height = settings["maxDecodeHeight"].get<int>();
+                        session.set_decode_limits(width <= 0 ? defaultWidth : uint32_t(std::clamp(width, 640, 4096)),
+                                                  height <= 0 ? defaultHeight : uint32_t(std::clamp(height, 480, 4096)));
+                    }
+                    session.update_settings(wire);
+                    break;
+                }
+                case CommandKind::Microphone: setMic(command.down); break;
+                case CommandKind::Pointer: {
+                    const auto stream = video.find(command.code == 0 ? focus : uint8_t(command.code));
+                    if (stream != video.end()) {
+                        if (focus != stream->first) {
+                            focus = stream->first;
+                            session.prefer_monitor(stream->second.config.monitor_id);
+                        }
+                        session.pointer(stream->first, command.x, command.y);
+                    }
+                    break;
+                }
                 case CommandKind::Button: session.mouse_button(command.code, command.down); break;
                 case CommandKind::Wheel: session.mouse_wheel(command.x, command.y); break;
                 case CommandKind::Key: session.key(uint16_t(command.code), command.down); break;
@@ -215,24 +370,85 @@ void RcdClient::run(rincast::SessionConfig config) {
         }
         pending.clear();
         session.pump();
-
-        const auto& monitors = session.monitors();
-        if (session.connected() && !monitors.empty() &&
-            std::none_of(monitors.begin(), monitors.end(), [&](const auto& item) { return item.id == monitorId; })) {
-            const auto primary = std::find_if(monitors.begin(), monitors.end(), [](const auto& item) { return item.primary; });
-            select((primary == monitors.end() ? monitors.front() : *primary).id);
+        if (micSettingsDirty) {
+            session.update_settings({{"micPassthrough", false}});
+            micSettingsDirty = false;
+        }
+        if (microphone) {
+            for (int i = 0; i < 4 && audio.TakeMicPacket(micPacket); ++i) session.send_mic(micPacket.data(), micPacket.size());
         }
 
-        if (const auto now = std::chrono::steady_clock::now(); dirty || now >= nextState) {
-            auto hosts = json::array(), displays = json::array();
+        const auto& monitors = session.monitors();
+        if (session.connected() && !showAll && !monitors.empty() &&
+            std::none_of(monitors.begin(), monitors.end(), [&](const auto& item) { return item.id == monitorId; })) {
+            const auto primary = std::find_if(monitors.begin(), monitors.end(), [](const auto& item) { return item.primary; });
+            select((primary == monitors.end() ? monitors.front() : *primary).id, false);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (session.connected() && (network.empty() || now - lastSample >= 1s)) {
+            const auto health = session.health();
+            network = {{"route", health.route}, {"recovered", health.fragments_recovered}};
+            if (health.connection.rttMs > 0) {
+                network["rttMs"] = health.connection.rttMs;
+                network["jitterMs"] = health.connection.rttVarMs;
+            }
+            const auto fragments = health.fragments_received + health.fragments_lost + health.fragments_recovered;
+            if (fragments) network["lossPercent"] = double(health.fragments_lost) * 100.0 / double(fragments);
+            const auto seconds = std::chrono::duration<double>(now - lastSample).count();
+            const auto rxBytes = health.connection.bytesReceived;
+            if (seconds >= 1 && rxBytes >= lastRxBytes && lastRxBytes) {
+                network["mbps"] = double(rxBytes - lastRxBytes) * 8e-6 / seconds;
+            }
+            lastRxBytes = rxBytes;
+            uint64_t targetKbps = 0;
+            for (const auto& [id, stats] : session.stream_stats()) {
+                targetKbps += stats.target_bitrate_kbps;
+                if (id == focus && stats.server_encode_ms > 0) network["encodeMs"] = stats.server_encode_ms;
+            }
+            if (targetKbps) network["targetMbps"] = double(targetKbps) / 1000;
+            if (const auto found = video.find(focus); found != video.end()) {
+                const auto& stream = found->second;
+                if (seconds >= 1) network["fps"] = double(stream.framesThisSecond) / seconds;
+                network["width"] = stream.width() > 0 ? stream.width() : stream.config.width;
+                network["height"] = stream.height() > 0 ? stream.height() : stream.config.height;
+                network["codec"] = std::string(codecName(stream.config.codec)) + (stream.config.ten_bit ? " 10-bit" : "");
+                const auto report = [&](const char* name, const Average& measurement) {
+                    if (measurement.value) network[name] = *measurement.value;
+                };
+                report("decodeMs", stream.decode);
+                report("captureEncodeMs", stream.captureEncode);
+                report("downlinkMs", stream.downlink);
+                report("captureToDecodeMs", stream.total);
+                if (seconds >= 1 && stream.decode.value) {
+                    session.report_decode(focus, *stream.decode.value, stream.total.value.value_or(0));
+                    json stages = {{"decode", *stream.decode.value}};
+                    if (stream.captureEncode.value) stages["capture"] = *stream.captureEncode.value;
+                    if (stream.downlink.value) stages["downlink"] = *stream.downlink.value;
+                    session.send_control({{"type", rc::msg::kStats}, {"stats", {
+                        {"fps", network["fps"]}, {"latencyMs", stream.total.value.value_or(0)},
+                        {"decodeMs", *stream.decode.value}, {"latencyStages", stages}}}});
+                }
+            }
+            for (auto& [id, stream] : video) stream.framesThisSecond = 0;
+            lastSample = now;
+        }
+
+        if (dirty || now >= nextState) {
+            auto hosts = json::array(), displays = json::array(), streams = json::array();
             for (const auto& item : session.hosts())
                 hosts.push_back({{"name", item.name}, {"address", item.address}, {"busy", item.busy}, {"os", item.os}});
             for (const auto& item : monitors)
                 displays.push_back({{"id", item.id}, {"name", item.name}, {"width", item.width}, {"height", item.height}});
+            for (const auto& [id, stream] : video) {
+                streams.push_back({{"streamId", id}, {"id", stream.config.monitor_id}, {"name", stream.config.name},
+                                   {"width", stream.config.width}, {"height", stream.config.height}});
+            }
             std::string updated = json{{"state", int(session.state())}, {"status", session.status()},
-                                       {"deviceId", session.device_id()},
-                                       {"discover", discover}, {"hosts", std::move(hosts)},
-                                       {"displays", std::move(displays)}, {"display", monitorId}, {"notice", notice},
+                                       {"deviceId", session.device_id()}, {"discover", discover}, {"hosts", std::move(hosts)},
+                                       {"displays", std::move(displays)}, {"display", monitorId}, {"streams", std::move(streams)},
+                                       {"allDisplays", showAll}, {"notice", notice}, {"microphone", microphone}, {"network", network},
+                                       {"codecs", codecs}, {"av1TenBit", av1TenBit},
                                        {"generation", generation}, {"decoded", decoded}, {"audioPackets", audioPackets}}
                                       .dump(-1, ' ', false, json::error_handler_t::replace);
             {
@@ -245,7 +461,6 @@ void RcdClient::run(rincast::SessionConfig config) {
     }
     session.disconnect();
 }
-
 RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mobile) {
     try {
         return new RcdClient(makeConfig(profile_dir, platform, mobile != 0));
@@ -258,7 +473,7 @@ RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mob
 void rcd_destroy(RcdClient* client) { delete client; }
 
 void rcd_command(RcdClient* client, int32_t kind, const char* value, int32_t flag) {
-    if (!client || kind < 0 || kind > int(CommandKind::Remote)) return;
+    if (!client || kind < 0 || kind > int(CommandKind::Microphone)) return;
     client->enqueue({static_cast<CommandKind>(kind), value ? value : "", 0, flag != 0});
 }
 
@@ -275,9 +490,15 @@ size_t rcd_state(RcdClient* client, uint8_t* output, size_t capacity) {
 }
 
 RcdFrame* rcd_acquire_frame(RcdClient* client, uint64_t after, uint64_t generation, RcdFrameView* output) {
+    return rcd_acquire_stream_frame(client, 0, after, generation, output);
+}
+
+RcdFrame* rcd_acquire_stream_frame(RcdClient* client, int32_t id, uint64_t after, uint64_t generation, RcdFrameView* output) {
     std::lock_guard lock(client->mutex);
-    const auto& frame = client->frame;
-    if (!frame || frame->sequence <= after || frame->generation != generation) return nullptr;
+    const auto lookup = id ? client->frames.find(uint8_t(id)) : client->frames.begin();
+    if (lookup == client->frames.end()) return nullptr;
+    const auto& frame = lookup->second;
+    if (frame->sequence <= after || frame->generation != generation) return nullptr;
     *output = {frame->sequence, frame->width, frame->height, frame->pixels.data()};
     return new RcdFrame{frame};
 }

@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>FogShot 需要访问局域网，以发现并连接同一网络中的电脑。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>FogShot 需要使用麦克风，将你的声音发送到已连接的电脑。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

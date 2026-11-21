@@ -19,9 +19,10 @@ class Media final {
     Media(Media&&) noexcept;
     Media& operator=(Media&&) noexcept;
 
-    // Initialize OpenH264 and the default playback device. Audio failure does
-    // not fail this call; AudioAvailable() reports that state. Safe to repeat.
-    bool Initialize();
+    // Initialize OpenH264 and optionally the default playback device. Audio
+    // failure does not fail this call; AudioAvailable() reports that state.
+    // Video-only decoder instances should pass false. Safe to repeat.
+    bool Initialize(bool playback = true);
 
     // Decode one Annex-B H.264 access unit. True means a new BGRA frame was
     // produced and stored. False includes incomplete pictures and errors.
@@ -44,6 +45,18 @@ class Media final {
 
     bool AudioAvailable() const noexcept;
     void SetMuted(bool muted) noexcept;
+
+    // Playback gain in the inclusive range [0, 1]. This is independent of mute.
+    void SetVolume(float volume) noexcept;
+
+    // Capture mono 48 kHz S16 microphone audio. The real-time callback only
+    // writes to a ring buffer; Opus encoding happens in TakeMicPacket().
+    bool StartMicrophone();
+    void StopMicrophone();
+
+    // Non-blocking. On success packet is one complete upstream AudioPacketHeader
+    // followed by a 10 ms (480 sample) mono Opus payload. Failure clears packet.
+    bool TakeMicPacket(std::vector<uint8_t>& packet);
 
     // Discard the pending picture, H.264 reference state and queued audio while
     // keeping the initialized playback device.

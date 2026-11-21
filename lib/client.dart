@@ -7,11 +7,20 @@ import 'package:ffi/ffi.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'native_bindings.dart';
+import 'stream_network.dart';
+import 'desktop_settings.dart';
 
 enum Phase { idle, connecting, approval, connected, failed }
 
 typedef Host = ({String name, String address, bool busy, String os});
 typedef Display = ({String id, String name, int width, int height});
+typedef DisplayStream = ({
+  int streamId,
+  String id,
+  String name,
+  int width,
+  int height,
+});
 
 class ClientState {
   const ClientState({
@@ -26,6 +35,11 @@ class ClientState {
     this.decoded = 0,
     this.audioPackets = 0,
     this.deviceId = '',
+    this.network = const StreamNetwork(),
+    this.streams = const [],
+    this.allDisplays = false,
+    this.microphone = false,
+    this.supportedCodecs = const {VideoCodecPreference.h264},
   });
 
   factory ClientState.fromJson(Map<String, dynamic> data) {
@@ -59,6 +73,25 @@ class ClientState {
       decoded: data['decoded'] as int? ?? 0,
       audioPackets: data['audioPackets'] as int? ?? 0,
       deviceId: data['deviceId'] as String? ?? '',
+      network: StreamNetwork.fromJson(
+        data['network'] as Map<String, dynamic>? ?? const {},
+      ),
+      streams: (data['streams'] as List? ?? [])
+          .map(
+            (item) => (
+              streamId: item['streamId'] as int,
+              id: item['id'] as String,
+              name: item['name'] as String,
+              width: item['width'] as int,
+              height: item['height'] as int,
+            ),
+          )
+          .toList(),
+      allDisplays: data['allDisplays'] as bool? ?? false,
+      microphone: data['microphone'] as bool? ?? false,
+      supportedCodecs: (data['codecs'] as List? ?? ['h264'])
+          .map((value) => VideoCodecPreference.fromValue(value as String))
+          .toSet(),
     );
   }
 
@@ -73,6 +106,11 @@ class ClientState {
   final int decoded;
   final int audioPackets;
   final String deviceId;
+  final StreamNetwork network;
+  final List<DisplayStream> streams;
+  final bool allDisplays;
+  final bool microphone;
+  final Set<VideoCodecPreference> supportedCodecs;
 
   bool get connected => phase == Phase.connected;
   bool get pending => phase == Phase.connecting || phase == Phase.approval;
@@ -102,7 +140,7 @@ class Client {
   int _capacity = 8192;
   final Pointer<NativeFrameView> _view = calloc<NativeFrameView>();
   String? _lastState;
-  int _sequence = 0;
+  final Map<int, int> _sequences = {};
 
   void dispose() {
     if (_handle == nullptr) return;
@@ -126,13 +164,20 @@ class Client {
     return ClientState.fromJson(jsonDecode(text) as Map<String, dynamic>);
   }
 
-  Future<ui.Image>? nextFrame(int generation) {
-    final frame = rcd_acquire_frame(_handle, _sequence, generation, _view);
+  Future<ui.Image>? nextFrame(int generation, {int streamId = 0}) {
+    if (_handle == nullptr) return null;
+    final frame = rcd_acquire_stream_frame(
+      _handle,
+      streamId,
+      _sequences[streamId] ?? 0,
+      generation,
+      _view,
+    );
     if (frame == nullptr) return null;
     final data = _view.ref;
     final width = data.width;
     final height = data.height;
-    _sequence = data.sequence;
+    _sequences[streamId] = data.sequence;
     return _loadFrame(frame, data.pixels, width, height);
   }
 
@@ -183,14 +228,31 @@ class Client {
     );
   }
 
-  void connect(String address) => _command(0, address);
+  void connect(String address) {
+    final firstColon = address.indexOf(':');
+    if (address.startsWith('[') && address.endsWith(']')) {
+      _command(0, '$address:38711');
+    } else if (!address.startsWith('[') &&
+        firstColon >= 0 &&
+        firstColon != address.lastIndexOf(':')) {
+      _command(0, '[$address]:38711');
+    } else {
+      _command(0, address);
+    }
+  }
+
   void connectRemote(Map<String, dynamic> offer) =>
       _command(5, jsonEncode(offer));
   void disconnect() => _command(1);
   void display(String id) => _command(2, id);
+  void showAllDisplays() => _command(2, null, true);
   void mute(bool enabled) => _command(3, null, enabled);
   void text(String text) => _command(4, text);
-  void point(double u, double v) => rcd_input(_handle, 0, 0, 0, u, v);
+  void settings(DesktopSettings settings) =>
+      _command(6, jsonEncode(settings.toJson()));
+  void microphone(bool enabled) => _command(7, null, enabled);
+  void point(double u, double v, {int streamId = 0}) =>
+      rcd_input(_handle, 0, streamId, 0, u, v);
   void button(int button, bool down) =>
       rcd_input(_handle, 1, button, down ? 1 : 0, 0, 0);
   void scroll(double x, double y) => rcd_input(_handle, 2, 0, 0, x, y);

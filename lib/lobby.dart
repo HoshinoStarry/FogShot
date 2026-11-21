@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import 'client.dart';
@@ -11,6 +13,7 @@ class Lobby extends StatefulWidget {
     this.initialAddress = '',
     this.account,
     this.requestingRemote = false,
+    this.onSettings,
   });
 
   final ClientState state;
@@ -19,6 +22,7 @@ class Lobby extends StatefulWidget {
   final String initialAddress;
   final Widget? account;
   final bool requestingRemote;
+  final VoidCallback? onSettings;
 
   @override
   State<Lobby> createState() => _LobbyState();
@@ -47,14 +51,21 @@ class _LobbyState extends State<Lobby> {
 
   static String? _validate(String? value) {
     final input = (value ?? '').trim();
-    final match = RegExp(r'^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$')
+    final bracketed = RegExp(r'^\[([^\]]+)\](?::(\d+))?$').firstMatch(input);
+    final ipv4 = RegExp(r'^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?$')
         .firstMatch(input);
-    if (match == null ||
-        match[1]!.split('.').any((part) => int.parse(part) > 255)) {
-      return '请输入有效的 IPv4 地址';
+    final match = bracketed ?? ipv4;
+    final host = match?[1] ?? input;
+    final scoped = host.split('%');
+    if (scoped.length > 2 ||
+        (scoped.length == 2 &&
+            (!scoped.first.contains(':') ||
+                !RegExp(r'^[\w.-]+$').hasMatch(scoped.last))) ||
+        InternetAddress.tryParse(scoped.first) == null) {
+      return '请输入有效的 IPv4 或 IPv6 地址';
     }
-    final port = int.tryParse(match[2] ?? '38711')!;
-    if (port < 1 || port > 65535) return '端口范围为 1–65535';
+    final port = int.tryParse(match?[2] ?? '38711');
+    if (port == null || port < 1 || port > 65535) return '端口范围为 1–65535';
     return null;
   }
 
@@ -96,14 +107,24 @@ class _LobbyState extends State<Lobby> {
                         ),
                       ),
                     ),
-                    IconButton(
-                      tooltip: '关于 FogShot',
-                      onPressed: () => showAboutDialog(
-                        context: context,
-                        applicationName: 'FogShot',
-                        applicationVersion: '0.1.0',
-                      ),
-                      icon: const Icon(Icons.info_outline),
+                    Row(
+                      children: [
+                        if (widget.onSettings case final openSettings?)
+                          IconButton(
+                            tooltip: '串流设置',
+                            onPressed: openSettings,
+                            icon: const Icon(Icons.settings_outlined),
+                          ),
+                        IconButton(
+                          tooltip: '关于 FogShot',
+                          onPressed: () => showAboutDialog(
+                            context: context,
+                            applicationName: 'FogShot',
+                            applicationVersion: '0.1.0',
+                          ),
+                          icon: const Icon(Icons.info_outline),
+                        ),
+                      ],
                     ),
                   ],
                 ),

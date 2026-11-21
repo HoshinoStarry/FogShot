@@ -22,7 +22,7 @@ void main() {
     await tester.enterText(find.byType(TextFormField), '192.168.1.400');
     await tester.tap(find.text('连接'));
     await tester.pump();
-    expect(find.text('请输入有效的 IPv4 地址'), findsOneWidget);
+    expect(find.text('请输入有效的 IPv4 或 IPv6 地址'), findsOneWidget);
     expect(address, isNull);
 
     await tester.enterText(find.byType(TextFormField), ' 192.168.1.42:48711 ');

@@ -40,9 +40,20 @@ bool SamePeer(const rc::NetAddress& a, const rc::NetAddress& b) {
 }
 
 int PathRank(const rc::NetAddress& address) {
+    if (!address.v6 && rc::RoutesThroughTunnel(address.ip)) return 1;
     if (!address.v6 && rc::IsPrivateLan(address.ip)) return 3;
     if (!address.v6 && rc::IsCgnat(address.ip)) return 1;
     return 2;
+}
+
+std::string RouteName(const rc::NetAddress& address) {
+    if (!address.v6) {
+        if (rc::IsPrivateLan(address.ip) || (address.ip >> 24) == 127) return "lan4";
+        if (rc::RoutesThroughTunnel(address.ip)) return "vpn4";
+        return "wan4";
+    }
+    const bool ula = (address.ip6[0] & 0xfe) == 0xfc;
+    return address.IsLinkLocalV6() || ula ? "lan6" : "wan6";
 }
 
 void SendWithPortGuesses(rc::UdpSocket& socket, const rc::NetAddress& address, const void* data, size_t size,
@@ -88,6 +99,19 @@ void ClearSecret(std::string& value) {
 void ClearSecret(std::vector<uint8_t>& value) {
     if (!value.empty()) rc::crypto::Wipe(value.data(), value.size());
     value.clear();
+}
+
+bool EligibleUnicastDiscoveryInterface(const rc::NetInterface& interface) {
+    return !interface.isVirtual && interface.name.rfind("en", 0) == 0 && rc::IsPrivateLan(interface.ip);
+}
+
+uint32_t UnicastDiscoveryMask(const rc::NetInterface& interface) {
+    return std::max(interface.netmask, 0xFFFFFF00u);
+}
+
+bool InDiscoverySubnet(uint32_t address, const rc::NetInterface& interface) {
+    const uint32_t mask = UnicastDiscoveryMask(interface);
+    return (address & mask) == (interface.ip & mask);
 }
 
 nlohmann::json ParsedObject(std::string_view text) {
@@ -141,7 +165,8 @@ void Session::set_state(State state, std::string status) {
 bool Session::open_discovery(std::string& error) {
     if (m_discovery_socket.IsOpen()) return true;
     // 客户端只发 Probe 并接收单播 Announce。绑定固定发现端口会被防火墙视为监听服务。
-    if (!m_discovery_socket.Open(0, true)) {
+    // unicast_discovery 连 SO_BROADCAST 都不开启，避免 iOS 原始广播 entitlement 检查。
+    if (!m_discovery_socket.Open(0, !m_config.unicast_discovery)) {
         error = "Cannot open the LAN discovery socket";
         return false;
     }
@@ -208,6 +233,14 @@ bool Session::connect(const rc::NetAddress& endpoint, std::string name) {
     m_waiting_recovery.clear();
     m_server_info = nlohmann::json::object();
     m_server_settings = nlohmann::json::object();
+    m_server_stats = nlohmann::json::object();
+    m_stream_stats.clear();
+    m_stats_window_frames.clear();
+    m_stats_window_bytes.clear();
+    m_stats_window_ns = 0;
+    m_fragments_received = 0;
+    m_fragments_recovered = 0;
+    m_fragments_lost = 0;
 
     std::string error;
     if (!open_stream_socket(error)) {
@@ -310,6 +343,14 @@ bool Session::connect_remote(const nlohmann::json& offer) {
     m_waiting_recovery.clear();
     m_server_info = nlohmann::json::object();
     m_server_settings = nlohmann::json::object();
+    m_server_stats = nlohmann::json::object();
+    m_stream_stats.clear();
+    m_stats_window_frames.clear();
+    m_stats_window_bytes.clear();
+    m_stats_window_ns = 0;
+    m_fragments_received = 0;
+    m_fragments_recovered = 0;
+    m_fragments_lost = 0;
     m_pc_addresses.clear();
     m_peers.clear();
     clear_remote_secrets();
@@ -492,12 +533,66 @@ void Session::pump_discovery(int64_t now_ns) {
     if (m_last_probe_ns == 0 || now_ns - m_last_probe_ns >= 2'000'000'000LL) {
         const rc::DiscoveryProbe probe{m_device_id, m_config.device_name, m_probe_nonce++};
         const auto bytes = rc::BuildProbe(probe);
-        for (const auto& interface : rc::ListInterfaces()) {
-            if (interface.isVirtual) continue;
-            m_discovery_socket.SendTo({interface.broadcast(), rc::kDiscoveryPort}, bytes.data(), bytes.size());
+        if (m_config.unicast_discovery) {
+            const auto interfaces = rc::ListInterfaces();
+            for (const auto& host : m_hosts) {
+                if (!host.endpoint.valid() || host.endpoint.v6 || !rc::IsPrivateLan(host.endpoint.ip)) continue;
+                const bool connected_subnet = std::any_of(interfaces.begin(), interfaces.end(), [&](const auto& interface) {
+                    return EligibleUnicastDiscoveryInterface(interface) && InDiscoverySubnet(host.endpoint.ip, interface);
+                });
+                if (!connected_subnet) continue;
+                rc::NetAddress discovery = host.endpoint;
+                discovery.port = rc::kDiscoveryPort;
+                m_discovery_socket.SendTo(discovery, bytes.data(), bytes.size());
+            }
+        } else {
+            for (const auto& interface : rc::ListInterfaces()) {
+                if (interface.isVirtual) continue;
+                m_discovery_socket.SendTo({interface.broadcast(), rc::kDiscoveryPort}, bytes.data(), bytes.size());
+            }
+            m_discovery_socket.SendTo(rc::NetAddress::Broadcast(rc::kDiscoveryPort), bytes.data(), bytes.size());
+            for (const auto& host : m_hosts) {
+                if (host.endpoint.valid()) {
+                    rc::NetAddress discovery = host.endpoint;
+                    discovery.port = rc::kDiscoveryPort;
+                    m_discovery_socket.SendTo(discovery, bytes.data(), bytes.size());
+                }
+            }
         }
-        m_discovery_socket.SendTo(rc::NetAddress::Broadcast(rc::kDiscoveryPort), bytes.data(), bytes.size());
         m_last_probe_ns = now_ns;
+    }
+
+    if (m_state == State::Idle || m_state == State::Failed) {
+        if (m_sweep_index >= m_sweep_hosts.size() &&
+            (m_last_sweep_ns == 0 || now_ns - m_last_sweep_ns > (m_hosts.empty() ? 30'000'000'000LL
+                                                                                : 120'000'000'000LL))) {
+            m_sweep_hosts.clear();
+            for (const auto& interface : rc::ListInterfaces()) {
+                if (m_config.unicast_discovery) {
+                    if (!EligibleUnicastDiscoveryInterface(interface)) continue;
+                    // 保留 /25–/32 等更窄实际网段；更宽的前缀最多按 /24 覆盖邻接集合。
+                    for (const uint32_t address : rc::SubnetHosts(interface.ip, UnicastDiscoveryMask(interface), 254)) {
+                        if (m_sweep_hosts.size() >= 256) break;
+                        m_sweep_hosts.push_back(address);
+                    }
+                } else {
+                    if (interface.isVirtual || (!rc::IsPrivateLan(interface.ip) && (interface.ip >> 16) != 0xA9FE)) continue;
+                    for (const uint32_t address : rc::SubnetHosts(interface.ip, interface.netmask, 1024)) {
+                        m_sweep_hosts.push_back(address);
+                    }
+                }
+            }
+            m_sweep_index = 0;
+            m_last_sweep_ns = now_ns;
+        }
+        if (m_sweep_index < m_sweep_hosts.size() && now_ns - m_last_sweep_batch_ns >= 100'000'000LL) {
+            const rc::DiscoveryProbe probe{m_device_id, m_config.device_name, m_probe_nonce};
+            const auto bytes = rc::BuildProbe(probe);
+            for (int count = 0; count < 12 && m_sweep_index < m_sweep_hosts.size(); ++count, ++m_sweep_index) {
+                m_discovery_socket.SendTo({m_sweep_hosts[m_sweep_index], rc::kDiscoveryPort}, bytes.data(), bytes.size());
+            }
+            m_last_sweep_batch_ns = now_ns;
+        }
     }
 
     uint8_t buffer[2048];
@@ -521,17 +616,39 @@ void Session::pump_discovery(int64_t now_ns) {
         if (!host.endpoint.valid()) continue;
         host.address = host.endpoint.ToString();
         host.last_seen_ns = rc::NowNs();
+        host.address_seen_ns = host.last_seen_ns;
 
         auto existing = std::find_if(m_hosts.begin(), m_hosts.end(),
                                      [&](const Host& value) { return value.id == host.id; });
         if (existing == m_hosts.end()) m_hosts.push_back(std::move(host));
-        else *existing = std::move(host);
+        else {
+            const int old_rank = PathRank(existing->endpoint);
+            const int new_rank = PathRank(host.endpoint);
+            const bool same_address = existing->endpoint == host.endpoint;
+            const bool current_stale = host.last_seen_ns - existing->address_seen_ns > 12'000'000'000LL;
+            const bool replace = new_rank > old_rank || (same_address) ||
+                                 (new_rank == old_rank && host.last_seen_ns - existing->address_seen_ns > 6'000'000'000LL) ||
+                                 current_stale;
+            if (replace) {
+                *existing = std::move(host);
+            } else {
+                existing->name = host.name;
+                existing->version = host.version;
+                existing->os = host.os;
+                existing->gpu = host.gpu;
+                existing->busy = host.busy;
+                existing->account_linked = host.account_linked;
+                existing->account_name = host.account_name;
+                existing->last_seen_ns = host.last_seen_ns;
+            }
+        }
     }
 
     m_hosts.erase(std::remove_if(m_hosts.begin(), m_hosts.end(),
                                  [&](const Host& host) { return now_ns - host.last_seen_ns > kHostTimeoutNs; }),
                   m_hosts.end());
     std::sort(m_hosts.begin(), m_hosts.end(), [](const Host& a, const Host& b) {
+        if (PathRank(a.endpoint) != PathRank(b.endpoint)) return PathRank(a.endpoint) > PathRank(b.endpoint);
         if (a.name != b.name) return a.name < b.name;
         return a.id < b.id;
     });
@@ -680,6 +797,7 @@ void Session::pump_session(int64_t now_ns) {
 
     m_connection->Tick(now_ns);
     probe_remote_paths(now_ns);
+    update_stats_window(now_ns);
     const bool urgent = m_feedback_now && now_ns - m_last_feedback_ns >= 5'000'000LL;
     if (urgent || now_ns - m_last_feedback_ns >= 100'000'000LL) send_feedback(now_ns);
 
@@ -694,6 +812,10 @@ void Session::pump_session(int64_t now_ns) {
         m_reassemblers.clear();
         m_waiting_recovery.clear();
         m_streams.clear();
+        m_stream_stats.clear();
+        m_stats_window_frames.clear();
+        m_stats_window_bytes.clear();
+        m_server_stats = nlohmann::json::object();
         clear_remote_secrets();
         set_state(State::Failed, remote ? "The host ended the session" : "Connection lost");
     }
@@ -710,6 +832,23 @@ void Session::handle_control(std::string_view text) {
     } else if (type == rc::msg::kSettings) {
         if (!message.contains("settings") || !message["settings"].is_object()) return;
         m_server_settings = message["settings"];
+    } else if (type == rc::msg::kServerStats) {
+        m_server_stats = message;
+        if (message.contains("desktop") && message["desktop"].is_array()) {
+            for (const auto& item : message["desktop"]) {
+                if (!item.is_object()) continue;
+                const int id = item.value("streamId", 0);
+                if (id < int(rc::kFirstMonitorStreamId) || id >= int(rc::kMaxStreams)) continue;
+                auto& stats = m_stream_stats[uint8_t(id)];
+                stats.stream_id = uint8_t(id);
+                stats.server_fps = item.value("fps", 0.0);
+                stats.server_encode_ms = item.value("encodeMs", 0.0);
+                stats.server_mbps = item.value("mbps", 0.0);
+                stats.target_bitrate_kbps = item.value("bitrateKbps", 0u);
+                stats.server_frames_lost = item.value("framesLost", 0u);
+                stats.updated_ns = rc::NowNs();
+            }
+        }
     } else if (type == rc::msg::kMonitors) {
         m_monitors.clear();
         if (message.contains("monitors") && message["monitors"].is_array()) {
@@ -754,10 +893,15 @@ void Session::handle_control(std::string_view text) {
 
         // 新配置代表显示器布局切换；旧流的帧号和参考链都不能继续使用。
         m_reassemblers.clear();
+        m_stream_stats.clear();
+        m_stats_window_frames.clear();
+        m_stats_window_bytes.clear();
+        m_stats_window_ns = 0;
         for (const uint8_t id : active) {
             m_last_good_frame[id] = 0;
             m_pending_keyframe[id] = true;
             m_waiting_recovery[id] = true;
+            m_stream_stats[id].stream_id = id;
         }
         for (auto it = m_last_good_frame.begin(); it != m_last_good_frame.end();) {
             if (active.contains(it->first)) ++it;
@@ -806,6 +950,23 @@ void Session::handle_packet(rc::PacketType type, const uint8_t* payload, size_t 
             if (!reassembler) {
                 reassembler = std::make_unique<rc::VideoReassembler>([this, stream_id](rc::ReceivedFrame&& frame) {
                     const uint32_t frame_index = frame.frameIndex;
+                    auto& stats = m_stream_stats[stream_id];
+                    stats.stream_id = stream_id;
+                    stats.last_frame = frame_index;
+                    ++stats.frames_received;
+                    ++m_stats_window_frames[stream_id];
+                    stats.network_ms = rc::NsToMs(frame.completeNs - frame.firstFragmentNs);
+                    if (frame.metadata.size() >= sizeof(rc::DesktopFrameMetadata) && m_connection &&
+                        m_connection->HasClockOffset()) {
+                        rc::DesktopFrameMetadata metadata;
+                        std::memcpy(&metadata, frame.metadata.data(), sizeof(metadata));
+                        const int64_t encoded_local = m_connection->RemoteToLocalNs(metadata.pcEncodeEndNs);
+                        const double measured = rc::NsToMs(frame.completeNs - encoded_local);
+                        if (measured >= 0) stats.latency_ms = measured;
+                    } else if (stats.latency_ms <= 0) {
+                        stats.latency_ms = stats.network_ms;
+                    }
+                    stats.updated_ns = rc::NowNs();
                     const bool recovery_frame = (frame.flags & (rc::kVideoKeyframe | rc::kVideoRecovery)) != 0;
                     if (m_waiting_recovery[stream_id] && !recovery_frame) return;
                     bool decoded = false;
@@ -873,6 +1034,16 @@ void Session::send_feedback(int64_t now_ns) {
         packet.receivedKbps = uint32_t(stats.bytesReceived * 8 * 1000 / uint64_t(window_ns / 1000));
         packet.queueDelayMs = -1.f;
         feedback.push_back(packet);
+        auto& local = m_stream_stats[stream_id];
+        local.stream_id = stream_id;
+        local.frames_lost += stats.framesLost;
+        local.fragments_recovered += stats.fragmentsRecovered;
+        local.network_ms = stats.framesComplete ? stats.spreadMsSum / stats.framesComplete : local.network_ms;
+        m_stats_window_bytes[stream_id] += stats.bytesReceived;
+        m_fragments_received += stats.fragmentsReceived;
+        m_fragments_recovered += stats.fragmentsRecovered;
+        m_fragments_lost += stats.fragmentsLost;
+        local.updated_ns = now_ns;
         if (lost) m_waiting_recovery[stream_id] = true;
         m_pending_keyframe[stream_id] = false;
     }
@@ -913,16 +1084,36 @@ bool Session::stop_desktop() {
         m_streams.clear();
         m_reassemblers.clear();
         m_waiting_recovery.clear();
+        m_stream_stats.clear();
+        m_stats_window_frames.clear();
+        m_stats_window_bytes.clear();
+        m_server_stats = nlohmann::json::object();
         if (m_callbacks.on_stream_config) m_callbacks.on_stream_config(m_streams);
     }
     return sent;
 }
 
 bool Session::update_settings(const nlohmann::json& settings) {
-    if (!m_connection || !settings.is_object()) return false;
-    m_config.settings = settings;
-    return send_control({{"type", rc::msg::kUpdateSettings}, {"settings", settings}});
+    if (!settings.is_object()) return false;
+    if (!m_config.settings.is_object()) m_config.settings = nlohmann::json::object();
+    m_config.settings.update(settings);
+    if (!m_connection) return true;
+    return send_control({{"type", rc::msg::kUpdateSettings}, {"settings", m_config.settings}});
 }
+
+void Session::set_decode_limits(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) return;
+    if (!m_config.decoders.is_object()) m_config.decoders = nlohmann::json::object();
+    m_config.decoders["maxWidth"] = width;
+    m_config.decoders["maxHeight"] = height;
+}
+
+bool Session::focus_monitor(std::string monitor_id) {
+    if (!m_connection) return false;
+    return send_control({{"type", "desktop.active"}, {"monitorId", std::move(monitor_id)}});
+}
+
+bool Session::prefer_monitor(const std::string& monitor_id) { return focus_monitor(monitor_id); }
 
 bool Session::send_control(const nlohmann::json& message) {
     if (!m_connection || !message.is_object()) return false;
@@ -977,6 +1168,21 @@ bool Session::text(std::string_view utf8) {
     return send_control({{"type", rc::msg::kText}, {"text", value}});
 }
 
+bool Session::send_mic(const uint8_t* opus_packet, size_t size) {
+    if (!m_connection || !opus_packet || size == 0 || size > m_connection->MaxPayload() - sizeof(rc::AudioPacketHeader)) {
+        return false;
+    }
+    rc::AudioPacketHeader header{};
+    header.stream = uint8_t(rc::AudioStream::MicToPc);
+    header.channels = 1;
+    header.frameSamples = 480;
+    header.sequence = m_mic_sequence + 1;
+    header.timestampNs = uint64_t(rc::NowNs());
+    if (!m_connection->Send2(rc::PacketType::Audio, &header, sizeof(header), opus_packet, size)) return false;
+    m_mic_sequence = header.sequence;
+    return true;
+}
+
 void Session::release_controls() {
     if (m_connection) {
         const std::set<uint16_t> keys = m_held_keys;
@@ -1012,6 +1218,38 @@ void Session::request_keyframe(uint8_t stream_id) {
     m_last_feedback_ns = 0;
 }
 
+void Session::report_decode(uint8_t stream_id, double decode_ms, double latency_ms) {
+    if (stream_id < rc::kFirstMonitorStreamId || stream_id >= rc::kMaxStreams || !std::isfinite(decode_ms) ||
+        !std::isfinite(latency_ms)) {
+        return;
+    }
+    auto& stats = m_stream_stats[stream_id];
+    stats.stream_id = stream_id;
+    stats.decode_ms = std::max(0.0, decode_ms);
+    if (latency_ms > 0) stats.latency_ms = latency_ms;
+    stats.updated_ns = rc::NowNs();
+}
+
+void Session::update_stats_window(int64_t now_ns) {
+    if (m_stats_window_ns == 0) {
+        m_stats_window_ns = now_ns;
+        return;
+    }
+    const int64_t elapsed = now_ns - m_stats_window_ns;
+    if (elapsed < 1'000'000'000LL) return;
+    const double seconds = double(elapsed) / 1e9;
+    for (auto& [stream_id, stats] : m_stream_stats) {
+        const uint32_t frames = m_stats_window_frames[stream_id];
+        const uint64_t bytes = m_stats_window_bytes[stream_id];
+        stats.receive_fps = frames / seconds;
+        stats.receive_mbps = double(bytes) * 8.0 / seconds / 1e6;
+        stats.updated_ns = now_ns;
+    }
+    m_stats_window_frames.clear();
+    m_stats_window_bytes.clear();
+    m_stats_window_ns = now_ns;
+}
+
 Health Session::health() const {
     Health value;
     if (m_connection) {
@@ -1020,7 +1258,11 @@ Health Session::health() const {
         value.clock_offset_ns = m_connection->ClockOffsetNs();
         value.clock_synchronized = m_connection->HasClockOffset();
         value.control_queue_chunks = m_connection->SendQueueChunks();
+        value.route = RouteName(m_connection->Remote());
     }
+    value.fragments_received = m_fragments_received;
+    value.fragments_recovered = m_fragments_recovered;
+    value.fragments_lost = m_fragments_lost;
     value.video_streams = m_streams.size();
     return value;
 }
@@ -1061,6 +1303,11 @@ void Session::disconnect() {
     m_last_good_frame.clear();
     m_pending_keyframe.clear();
     m_waiting_recovery.clear();
+    m_stream_stats.clear();
+    m_stats_window_frames.clear();
+    m_stats_window_bytes.clear();
+    m_stats_window_ns = 0;
+    m_server_stats = nlohmann::json::object();
     m_feedback_now = false;
     set_state(State::Idle, m_config.discover ? "Searching for LAN hosts..." : "LAN discovery is disabled");
 }

@@ -32,6 +32,8 @@ Future<void> main(List<String> args) async {
       'RINCAST_OPENH264',
       'RINCAST_LIBYUV',
       'RINCAST_MINIAUDIO',
+      'RINCAST_DAV1D',
+      'RINCAST_MESON',
     ]) {
       final path = input.userDefines.path('${name.toLowerCase()}_source');
       if (path == null) continue;

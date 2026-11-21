@@ -34,6 +34,7 @@ struct Host {
     bool account_linked = false;
     std::string account_name;
     int64_t last_seen_ns = 0;
+    int64_t address_seen_ns = 0;
 };
 
 struct Monitor {
@@ -58,6 +59,26 @@ struct StreamConfig {
     bool ten_bit = false;
 };
 
+// stats.server 与本地重组结果合并后的单路桌面统计。server_* 为每秒采样，receive_* 为本地窗口。
+struct DesktopStreamStats {
+    uint8_t stream_id = 0;
+    double server_fps = 0;
+    double server_encode_ms = 0;
+    double server_mbps = 0;
+    uint32_t target_bitrate_kbps = 0;
+    uint32_t server_frames_lost = 0;
+    uint32_t frames_received = 0;
+    uint32_t frames_lost = 0;
+    uint32_t fragments_recovered = 0;
+    uint32_t last_frame = 0;
+    double receive_fps = 0;
+    double receive_mbps = 0;
+    double network_ms = 0;
+    double decode_ms = 0;
+    double latency_ms = 0;
+    int64_t updated_ns = 0;
+};
+
 struct SessionConfig {
     std::string device_id;    // 留空时从身份公钥生成，重连时应保持稳定
     std::string device_name = "RinCast Desktop";
@@ -78,11 +99,18 @@ struct SessionConfig {
     std::vector<std::string> monitors;
     // iOS 的原始广播需要额外 entitlement；关闭后仍可直接连接已知地址。
     bool discover = true;
+    // iOS/macOS 受限环境：只向非虚拟 en* 私有地址的邻接 /24 发单播 Probe，不发广播或多播。
+    bool unicast_discovery = false;
     bool auto_start_desktop = true;
 };
 
 struct Health {
     rc::ConnectionStats connection;
+    // lan4, lan6, vpn4, wan4 或 wan6。
+    std::string route;
+    uint64_t fragments_received = 0;
+    uint64_t fragments_recovered = 0;
+    uint64_t fragments_lost = 0;
     int64_t last_receive_age_ms = 0;
     int64_t clock_offset_ns = 0;
     bool clock_synchronized = false;
@@ -152,7 +180,13 @@ class Session final {
     bool start_desktop(const std::vector<std::string>& monitor_ids = {});
     bool stop_desktop();
     bool update_settings(const nlohmann::json& settings);
+    // 只更新下次握手携带的 decoders.maxWidth/maxHeight，不会在已连接时重发 client.info。
+    void set_decode_limits(uint32_t width, uint32_t height);
+    bool focus_monitor(std::string monitor_id);
+    bool prefer_monitor(const std::string& monitor_id);
     bool send_control(const nlohmann::json& message);
+    // opus_packet 不含 AudioPacketHeader。Session 按上游约定补 48 kHz 单声道、480 samples。
+    bool send_mic(const uint8_t* opus_packet, size_t size);
 
     // 绝对位置是 0..1。只有流 ID 1..15 有效。
     bool send_pointer(const rc::PointerPayload& pointer);
@@ -167,6 +201,9 @@ class Session final {
     // 解码层成功解出 frame_index 后调用；丢包恢复会以此为 lastGoodFrame。
     void set_last_good_frame(uint8_t stream_id, uint32_t frame_index);
     void request_keyframe(uint8_t stream_id);
+    void report_decode(uint8_t stream_id, double decode_ms, double latency_ms = 0);
+    const nlohmann::json& server_stats() const { return m_server_stats; }
+    const std::map<uint8_t, DesktopStreamStats>& stream_stats() const { return m_stream_stats; }
 
    private:
     void set_state(State state, std::string status);
@@ -184,6 +221,7 @@ class Session final {
     void handle_rendezvous(const uint8_t* data, size_t size, const rc::NetAddress& from);
     void probe_remote_paths(int64_t now_ns);
     void clear_remote_secrets();
+    void update_stats_window(int64_t now_ns);
     void send_client_info();
     void send_feedback(int64_t now_ns);
 
@@ -198,6 +236,10 @@ class Session final {
     bool m_discovery_open = false;
     int64_t m_last_probe_ns = 0;
     uint32_t m_probe_nonce = 1;
+    std::vector<uint32_t> m_sweep_hosts;
+    size_t m_sweep_index = 0;
+    int64_t m_last_sweep_ns = 0;
+    int64_t m_last_sweep_batch_ns = 0;
     std::vector<Host> m_hosts;
 
     rc::UdpSocket m_socket;
@@ -230,6 +272,15 @@ class Session final {
     std::vector<StreamConfig> m_streams;
     nlohmann::json m_server_info = nlohmann::json::object();
     nlohmann::json m_server_settings = nlohmann::json::object();
+    nlohmann::json m_server_stats = nlohmann::json::object();
+    std::map<uint8_t, DesktopStreamStats> m_stream_stats;
+    std::map<uint8_t, uint32_t> m_stats_window_frames;
+    std::map<uint8_t, uint64_t> m_stats_window_bytes;
+    int64_t m_stats_window_ns = 0;
+    uint32_t m_mic_sequence = 0;
+    uint64_t m_fragments_received = 0;
+    uint64_t m_fragments_recovered = 0;
+    uint64_t m_fragments_lost = 0;
     std::map<uint8_t, std::unique_ptr<rc::VideoReassembler>> m_reassemblers;
     std::map<uint8_t, uint32_t> m_last_good_frame;
     std::map<uint8_t, bool> m_pending_keyframe;

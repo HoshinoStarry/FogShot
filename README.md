@@ -18,12 +18,14 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 
 ## 连接和操作
 
-1. 在主机打开 RinCast Streamer。客户端点击附近的主机，或输入 Streamer 首页显示的 IPv4 地址。默认串流端口是 UDP `38711`，也可填写 `192.168.1.42:38711`。
+1. 在主机打开 RinCast Streamer。客户端点击附近的主机，或输入 Streamer 首页显示的 IPv4 或 IPv6 地址。串流默认使用 UDP `38711`。可填写 `192.168.1.42:38711` 或 `[2001:db8::42]:38711`。
 2. 首次连接时，在 Streamer 上允许配对。客户端保留本地设备身份，方便下次重连。
-3. 默认打开主显示器。串流顶部可以切换显示器、发送文字、静音、隐藏工具栏或断开连接。
-4. 桌面设备可直接在画面里使用鼠标和物理键盘。触屏上单击、长按、拖动和双指滑动分别对应左键、右键、左键拖动和滚动。输入中文等文字时，使用工具栏的键盘按钮打开输入框。
+3. 默认打开主显示器。顶栏可以切换到其他显示器或平铺全部显示器。点击网络状态可查看实际连接路径、RTT、接收与目标码率、解码帧率、分辨率、FEC 和延迟分段。
+4. 桌面设备可直接在画面里使用鼠标和物理键盘。触屏上单击、长按、拖动和双指滑动分别对应左键、右键、左键拖动和滚动。键盘菜单提供屏幕 QWERTY 键盘、粘滞修饰键和独立文字输入框。
+5. 串流设置提供自动、30、60、90 FPS、目标码率、自适应码率、解码尺寸、播放音量、亮度、自动连接和断线重连。解码尺寸在下次连接时生效。
+6. 麦克风回传需要本机授权，并在 Streamer 配置可用的虚拟麦克风设备。
 
-iOS 上的局域网直连使用手动地址。第一次发起局域网连接时允许系统弹出的「本地网络」权限。Apple 对设备上的 UDP 广播另设签名权限。[Apple 本地网络说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+iOS 使用局域网单播探测，也可手动输入地址。第一次使用时请允许系统弹出的「本地网络」权限。[Apple 本地网络说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
 
 ## 账号与跨网络串流
 
@@ -33,11 +35,11 @@ iOS 上的局域网直连使用手动地址。第一次发起局域网连接时�
 
 默认使用 `https://rincast.com`。自建服务可通过账号卡片右上角的设置按钮配置 HTTPS 地址。登录凭据由系统安全存储保存。跨网络会话由 RinCast 服务交换地址，画面和声音通过客户端与主机建立的 UDP 直连传输。若当前网络无法建立直连，客户端会显示连接失败。[RinCast 账户和引介协议](https://github.com/TheReal-Flo/RinCast/blob/10ebeb207a65fad7ea23ebdca038e59ccff2315b/server/README.md)
 
-首版使用 H.264 软件解码和 Opus 主机声音，一次播放一台显示器，以降低移动端负载。桌面默认请求 60 FPS，移动设备默认请求 30 FPS。实际帧率受主机、网络和客户端性能影响。VR、麦克风回传和硬件视频解码暂未实现。客户端沿用上游局域网配对模型，局域网模式适用于可信网络。
+桌面默认请求 60 FPS，移动设备默认请求 30 FPS。默认使用 H.264 软件解码。可选择 AV1，主机支持时可协商 10 位码流并转换为屏幕预览。HEVC 解码和硬件解码仍待接入。FogShot 沿用上游局域网配对模型，局域网模式适用于可信网络。
 
 ## 从源码构建
 
-安装 Flutter 3.50.1、CMake 3.24 或以上及目标平台工具链。初次构建需下载固定版本的原生依赖。在项目目录运行 `flutter pub get`，随后按目标平台构建。
+安装 Flutter 3.50.1、CMake 3.24 或以上、Python 3、Ninja 及目标平台工具链。初次构建需下载固定版本的原生依赖。在项目目录运行 `flutter pub get`，随后按目标平台构建。
 
 | 平台 | 工具链 | 命令 |
 | --- | --- | --- |
@@ -55,4 +57,4 @@ iOS 上的局域网直连使用手动地址。第一次发起局域网连接时�
 
 Flutter 负责连接界面、视频显示、键鼠和触控。C++ 后台线程负责网络、音视频解码和回传。Flutter 逐帧读取最新的 BGRA 缓冲，控件和输入逻辑在五个平台共享。
 
-项目采用 MIT 许可证。第三方授权见 `licenses/`，包括 RinCast、OpenH264、Opus、Monocypher、nlohmann/json、libyuv 和 miniaudio。
+项目采用 MIT 许可证。第三方授权见 `licenses/`，包括 RinCast、OpenH264、dav1d、Opus、Monocypher、nlohmann/json、libyuv 和 miniaudio。

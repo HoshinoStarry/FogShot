@@ -23,3 +23,5 @@
 - 排查 M2 上 macOS 27.3 Beta 的启动失败。旧 ZIP 内的主程序保留了执行权限和 ARM64/x64 切片。构建新增 DMG 和严格签名校验，并用 macOS 27 Runner 挂载发布包、复制应用及启动验证。
 - macOS 27.0.1 Runner 复现启动失败。AMFI 拒绝由临时签名声明的 `keychain-access-groups`。删除 macOS 的该项权限，令牌改用 macOS 登录钥匙串。独立的上游 RinCast 服务验证了邮箱密码登录、主机查询和连接申请。
 - 提交 `21095ae` 的七项平台构建通过。macOS 27.0.1 Runner 用发布 DMG 安装应用，严格校验签名后实际启动并持续运行。[CI 与发布包](https://github.com/HoshinoStarry/FogShot/actions/runs/44929978529)
+- 重整串流顶栏和实时网络状态。新增多显示器平铺与独立指针路由、桌面帧率与码率设置、画面亮度、屏幕键盘、麦克风回传、自动连接与断线重连，加入私有子网单播发现和 AV1 解码。
+- Windows 隔离回环测试分别解码两路 H.264 和 AV1 10 位视频，验证第二显示器的指针路由、实时状态快照和发往主机的 `stats.client`。Android ARM64 原生库交叉编译通过。HEVC 尚未接入。真实公网路径和移动设备麦克风回传需分别验收。

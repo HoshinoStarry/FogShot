@@ -17,10 +17,11 @@ FetchContent_Declare(RinCast
   SOURCE_SUBDIR shared)
 FetchContent_MakeAvailable(RinCast)
 include(cmake/OpenH264.cmake)
+include(cmake/ExtraVideo.cmake)
 
 add_library(rincast_backend SHARED src/bridge.cpp src/media.cpp src/session.cpp)
 target_link_libraries(rincast_backend PRIVATE
-  rincast-core openh264 libyuv rincast-miniaudio Threads::Threads)
+  rincast-core openh264 libyuv rincast-miniaudio rincast-extra-video Threads::Threads)
 set_target_properties(rincast_backend PROPERTIES
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 if(MSVC)
@@ -31,6 +32,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   enable_language(OBJCXX)
   set_source_files_properties(src/media.cpp PROPERTIES LANGUAGE OBJCXX)
   set_target_properties(rincast_backend PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-  target_compile_definitions(rincast_backend PRIVATE RINCAST_DISABLE_DISCOVERY)
+  target_compile_definitions(rincast_backend PRIVATE RINCAST_UNICAST_DISCOVERY)
 endif()
 install(TARGETS rincast_backend RUNTIME DESTINATION . LIBRARY DESTINATION .)

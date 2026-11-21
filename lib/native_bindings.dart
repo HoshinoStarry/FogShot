@@ -77,5 +77,22 @@ external Pointer<NativeFrame> rcd_acquire_frame(
   Pointer<NativeFrameView> output,
 );
 
+@Native<
+  Pointer<NativeFrame> Function(
+    Pointer<NativeClient>,
+    Int32,
+    Uint64,
+    Uint64,
+    Pointer<NativeFrameView>,
+  )
+>()
+external Pointer<NativeFrame> rcd_acquire_stream_frame(
+  Pointer<NativeClient> client,
+  int streamId,
+  int after,
+  int generation,
+  Pointer<NativeFrameView> output,
+);
+
 @Native<Void Function(Pointer<NativeFrame>)>()
 external void rcd_release_frame(Pointer<NativeFrame> frame);
