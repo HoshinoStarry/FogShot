@@ -148,8 +148,10 @@ void main() {
                 onPressed: () async {
                   result = await showDesktopSettings(
                     context,
-                    DesktopSettings.defaults(mobile: false)
-                        .copyWith(tenBit: true),
+                    DesktopSettings.defaults(mobile: false).copyWith(
+                      preferredCodec: VideoCodecPreference.auto,
+                      tenBit: true,
+                    ),
                     supportedCodecs: const {
                       VideoCodecPreference.h264,
                       VideoCodecPreference.av1,
@@ -169,7 +171,7 @@ void main() {
     expect(
       tester
           .widget<SwitchListTile>(
-            find.widgetWithText(SwitchListTile, '10-bit 色深'),
+            find.widgetWithText(SwitchListTile, '10 位色深'),
           )
           .value,
       isTrue,
@@ -178,14 +180,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('H.264'));
     await tester.pumpAndSettle();
-    expect(find.text('10-bit 色深'), findsNothing);
+    expect(find.text('10 位色深'), findsNothing);
 
     final autoCodec = find.widgetWithText(ChoiceChip, '自动').last;
     await tester.ensureVisible(autoCodec);
     await tester.pumpAndSettle();
     await tester.tap(autoCodec);
     await tester.pumpAndSettle();
-    expect(find.text('10-bit 色深'), findsOneWidget);
+    expect(find.text('10 位色深'), findsOneWidget);
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
 
