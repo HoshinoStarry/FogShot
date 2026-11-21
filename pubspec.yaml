@@ -1,0 +1,28 @@
+name: fogshot
+description: A Flutter desktop-streaming client for RinCast Streamer.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.14.0
+  flutter: '>=3.50.1'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  code_assets: ^2.1.0
+  ffi: ^2.2.0
+  hooks: ^2.2.0
+  material_ui: ^1.8.0
+  native_toolchain_cmake: 0.3.2
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - licenses/
