@@ -15,6 +15,7 @@ gradle.beforeSettings { settings ->
 
 gradle.beforeProject { project ->
     if (project.gradle.parent == null) {
+        centralMirror(project.buildscript.repositories)
         centralMirror(project.repositories)
     }
 }

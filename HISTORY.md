@@ -25,3 +25,4 @@
 - 提交 `21095ae` 的七项平台构建通过。macOS 27.0.1 Runner 用发布 DMG 安装应用，严格校验签名后实际启动并持续运行。[CI 与发布包](https://github.com/HoshinoStarry/FogShot/actions/runs/44929978529)
 - 重整串流顶栏和实时网络状态。新增多显示器平铺与独立指针路由、桌面帧率与码率设置、画面亮度、屏幕键盘、麦克风回传、自动连接与断线重连，加入私有子网单播发现和 AV1 解码。
 - Windows 隔离回环测试分别解码两路 H.264 和 AV1 10 位视频，验证第二显示器的指针路由、实时状态快照和发往主机的 `stats.client`。Android ARM64 原生库交叉编译通过。HEVC 尚未接入。真实公网路径和移动设备麦克风回传需分别验收。
+- Dart 静态分析和 15 项 Flutter 测试通过，覆盖窄屏串流顶栏、状态面板和 AV1 色深切换。Android CI 的插件依赖遇到 Maven Central 限流，已让 Gradle 插件依赖优先使用现有 Google 镜像。本地 Gradle 9.5 测试确认镜像顺序。
