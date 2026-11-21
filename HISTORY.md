@@ -22,3 +22,4 @@
 - 按上游 `/auth/login` 加入注册邮箱和密码登录，沿用设备身份、令牌安全存储和主机列表。`dart analyze` 通过，七项 Flutter 测试全部通过，覆盖密码错误、重试、令牌存储、密码遮蔽和窄屏布局。
 - 排查 M2 上 macOS 27.3 Beta 的启动失败。旧 ZIP 内的主程序保留了执行权限和 ARM64/x64 切片。构建新增 DMG 和严格签名校验，并用 macOS 27 Runner 挂载发布包、复制应用及启动验证。
 - macOS 27.0.1 Runner 复现启动失败。AMFI 拒绝由临时签名声明的 `keychain-access-groups`。删除 macOS 的该项权限，令牌改用 macOS 登录钥匙串。独立的上游 RinCast 服务验证了邮箱密码登录、主机查询和连接申请。
+- 提交 `21095ae` 的七项平台构建通过。macOS 27.0.1 Runner 用发布 DMG 安装应用，严格校验签名后实际启动并持续运行。[CI 与发布包](https://github.com/HoshinoStarry/FogShot/actions/runs/44929978529)
