@@ -124,7 +124,10 @@ if(NOT TARGET rincast-miniaudio)
     target_link_libraries(rincast-miniaudio INTERFACE
       "-framework AVFoundation"
       "-framework AudioToolbox"
+      "-framework CoreAudio"
       "-framework CoreFoundation"
+      "-framework Foundation"
+      objc
     )
   elseif(UNIX)
     find_package(Threads REQUIRED)

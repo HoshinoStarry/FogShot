@@ -1,0 +1,20 @@
+// GitHub-hosted runners can hit Maven Central's shared-IP rate limit.
+def centralMirror = { repositories ->
+    repositories.maven {
+        name = 'FogShotCiMavenCentral'
+        url = 'https://maven-central.storage-download.googleapis.com/maven2/'
+    }
+}
+
+gradle.beforeSettings { settings ->
+    centralMirror(settings.pluginManagement.repositories)
+    settings.pluginManagement.repositories.google()
+    settings.pluginManagement.repositories.gradlePluginPortal()
+    centralMirror(settings.dependencyResolutionManagement.repositories)
+}
+
+gradle.beforeProject { project ->
+    if (project.gradle.parent == null) {
+        centralMirror(project.repositories)
+    }
+}

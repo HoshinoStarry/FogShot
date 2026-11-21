@@ -14,3 +14,5 @@
 - 按用户要求移除 CI 的 iOS 模拟器，只保留未签名的 ARM64 真机包。首轮 Linux x64 和 ARM64 构建通过。首轮 Android Runner 缺少 `sdkmanager`，加入显式的 SDK 和 NDK 安装步骤。
 - 首轮 iOS 编译器将 miniaudio 的 AVAudioSession 头文件作为纯 C++ 处理，导致编译失败。将 iOS 的媒体实现交由 Objective-C++ 编译。
 - 首轮 Windows x64、ARM64 已生成经架构校验的便携包。macOS 通用应用已编译，校验命令因 `lipo` 参数顺序失败，已修正命令。
+- Android SDK 安装完成后，Maven Central 对 CI Runner 返回 HTTP 429。Android CI 优先使用 Google Cloud 的 Maven Central 镜像，保留 Gradle Plugin Portal 和 Google Maven。
+- macOS 通用包随后通过 x64 与 ARM64 校验并上传。iOS 已进入链接阶段，补上 miniaudio 所用的 Objective-C 运行时和系统框架，并保留详细构建日志。

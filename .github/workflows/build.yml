@@ -137,7 +137,7 @@ jobs:
       - name: Build unsigned iOS device app
         if: matrix.target == 'ios-device'
         run: |
-          flutter build ios --release --no-pub --no-codesign
+          flutter build ios --release --no-pub --no-codesign --verbose
           app="$(find build/ios/iphoneos -maxdepth 1 -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$APP_ID"
           executable="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")"
@@ -149,7 +149,11 @@ jobs:
 
       - name: Build Android release APKs by ABI
         if: matrix.target == 'android'
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/fogshot-gradle
         run: |
+          mkdir -p "$GRADLE_USER_HOME/init.d"
+          cp .github/ci/maven-central.init.gradle "$GRADLE_USER_HOME/init.d/"
           flutter build apk --release --no-pub --split-per-abi --target-platform android-arm,android-arm64,android-x64
           mkdir -p dist
           sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
