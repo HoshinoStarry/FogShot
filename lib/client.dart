@@ -25,6 +25,7 @@ class ClientState {
     this.generation = 0,
     this.decoded = 0,
     this.audioPackets = 0,
+    this.deviceId = '',
   });
 
   factory ClientState.fromJson(Map<String, dynamic> data) {
@@ -57,6 +58,7 @@ class ClientState {
       generation: data['generation'] as int? ?? 0,
       decoded: data['decoded'] as int? ?? 0,
       audioPackets: data['audioPackets'] as int? ?? 0,
+      deviceId: data['deviceId'] as String? ?? '',
     );
   }
 
@@ -70,6 +72,7 @@ class ClientState {
   final int generation;
   final int decoded;
   final int audioPackets;
+  final String deviceId;
 
   bool get connected => phase == Phase.connected;
   bool get pending => phase == Phase.connecting || phase == Phase.approval;
@@ -181,6 +184,8 @@ class Client {
   }
 
   void connect(String address) => _command(0, address);
+  void connectRemote(Map<String, dynamic> offer) =>
+      _command(5, jsonEncode(offer));
   void disconnect() => _command(1);
   void display(String id) => _command(2, id);
   void mute(bool enabled) => _command(3, null, enabled);

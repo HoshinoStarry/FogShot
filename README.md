@@ -23,9 +23,17 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 3. 默认打开主显示器。串流顶部可以切换显示器、发送文字、静音、隐藏工具栏或断开连接。
 4. 桌面设备可直接在画面里使用鼠标和物理键盘。触屏上单击、长按、拖动和双指滑动分别对应左键、右键、左键拖动和滚动。输入中文等文字时，使用工具栏的键盘按钮打开输入框。
 
-iOS 默认使用手动地址。第一次发起连接时允许系统弹出的「本地网络」权限。Apple 对设备上的 UDP 广播另设签名权限。[Apple 本地网络说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+iOS 上的局域网直连使用手动地址。第一次发起局域网连接时允许系统弹出的「本地网络」权限。Apple 对设备上的 UDP 广播另设签名权限。[Apple 本地网络说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
 
-首版使用 H.264 软件解码和 Opus 主机声音，一次播放一台显示器，以降低移动端负载。桌面默认请求 60 FPS，移动设备默认请求 30 FPS。实际帧率受主机、网络和客户端性能影响。RinCast 账号登录、公网引介、VR、麦克风回传和硬件视频解码暂未实现。客户端沿用上游局域网配对模型，局域网模式适用于可信网络。
+## 账号与跨网络串流
+
+1. 在主机的 RinCast Streamer 登录账号并允许远程连接。
+2. 在 FogShot 选择「登录 RinCast」，使用浏览器或 Streamer 确认设备码。
+3. 从同一账号下的主机列表选择在线主机。若 Streamer 要求首次配对，按主机提示允许。
+
+默认使用 `https://rincast.com`。自建服务可通过账号卡片右上角的设置按钮配置 HTTPS 地址。登录凭据由系统安全存储保存。跨网络会话由 RinCast 服务交换地址，画面和声音通过客户端与主机建立的 UDP 直连传输。若当前网络无法建立直连，客户端会显示连接失败。[RinCast 账户和引介协议](https://github.com/TheReal-Flo/RinCast/blob/10ebeb207a65fad7ea23ebdca038e59ccff2315b/server/README.md)
+
+首版使用 H.264 软件解码和 Opus 主机声音，一次播放一台显示器，以降低移动端负载。桌面默认请求 60 FPS，移动设备默认请求 30 FPS。实际帧率受主机、网络和客户端性能影响。VR、麦克风回传和硬件视频解码暂未实现。客户端沿用上游局域网配对模型，局域网模式适用于可信网络。
 
 ## 从源码构建
 
@@ -34,7 +42,7 @@ iOS 默认使用手动地址。第一次发起连接时允许系统弹出的「�
 | 平台 | 工具链 | 命令 |
 | --- | --- | --- |
 | Windows | Visual Studio 的「使用 C++ 的桌面开发」工作负载 | `flutter build windows --release` |
-| Linux | Clang、Ninja、pkg-config、GTK 3 开发库 | `flutter build linux --release` |
+| Linux | Clang、Ninja、pkg-config、GTK 3、libsecret 和 jsoncpp 开发库 | `flutter build linux --release` |
 | Android | Android SDK、NDK、JDK、Ninja | `flutter build apk --release --split-per-abi` |
 | macOS | Xcode 与命令行工具 | `flutter build macos --release` |
 | iOS | macOS 上的 Xcode | `flutter build ios --release --no-codesign` |

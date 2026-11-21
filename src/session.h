@@ -125,6 +125,9 @@ class Session final {
     bool connect(std::string_view address, std::string name = {});
     bool connect(const Host& host);
     bool connect(const rc::NetAddress& endpoint, std::string name = {});
+    // 使用 RinCast /connect 响应建立跨网络直连。必需字段为 sessionId、connectSecret、
+    // relayToken 和 rendezvous{host,port}。可附带 pcName、pcLocalAddrs 或 candidates。
+    bool connect_remote(const nlohmann::json& offer);
     // 主动发送 Disconnect 并释放本端持有的鼠标键和键盘键。
     void disconnect();
     void cancel();
@@ -132,6 +135,7 @@ class Session final {
     State state() const { return m_state; }
     bool connected() const { return m_state == State::Connected; }
     std::string status() const { return m_status; }
+    const std::string& device_id() const { return m_device_id; }
     const std::vector<Host>& hosts() const { return m_hosts; }
     const std::vector<Monitor>& monitors() const { return m_monitors; }
     const std::vector<StreamConfig>& streams() const { return m_streams; }
@@ -175,6 +179,11 @@ class Session final {
     void handle_control(std::string_view text);
     void handle_packet(rc::PacketType type, const uint8_t* payload, size_t size);
     void send_hello(int64_t now_ns);
+    void send_remote_register(int64_t now_ns);
+    void send_remote_hellos(int64_t now_ns);
+    void handle_rendezvous(const uint8_t* data, size_t size, const rc::NetAddress& from);
+    void probe_remote_paths(int64_t now_ns);
+    void clear_remote_secrets();
     void send_client_info();
     void send_feedback(int64_t now_ns);
 
@@ -200,6 +209,19 @@ class Session final {
     std::vector<uint8_t> m_hello_bytes;
     int64_t m_last_hello_ns = 0;
     int64_t m_deadline_ns = 0;
+    bool m_remote = false;
+    std::string m_remote_session;
+    std::string m_connect_secret;
+    std::string m_relay_token;
+    std::vector<rc::NetAddress> m_rendezvous;
+    std::vector<rc::NetAddress> m_pc_addresses;
+    std::vector<rc::NetAddress> m_peers;
+    std::vector<uint8_t> m_register_bytes;
+    bool m_remote_registered = false;
+    int64_t m_last_register_ns = 0;
+    int64_t m_session_start_ns = 0;
+    int64_t m_last_path_probe_ns = 0;
+    int64_t m_last_path_switch_ns = 0;
 
     std::unique_ptr<rc::Connection> m_connection;
     int64_t m_last_feedback_ns = 0;

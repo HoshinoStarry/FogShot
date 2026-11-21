@@ -8,6 +8,7 @@
 #include <set>
 #include <utility>
 
+#include "monocypher.h"
 #include "rc/discovery.h"
 #include "rc/handshake.h"
 #include "rc/platform.h"
@@ -36,6 +37,57 @@ bool SamePeer(const rc::NetAddress& a, const rc::NetAddress& b) {
     if (a.v6 != b.v6) return false;
     if (a.v6) return std::memcmp(a.ip6, b.ip6, sizeof(a.ip6)) == 0;
     return a.ip == b.ip;
+}
+
+int PathRank(const rc::NetAddress& address) {
+    if (!address.v6 && rc::IsPrivateLan(address.ip)) return 3;
+    if (!address.v6 && rc::IsCgnat(address.ip)) return 1;
+    return 2;
+}
+
+void SendWithPortGuesses(rc::UdpSocket& socket, const rc::NetAddress& address, const void* data, size_t size,
+                         bool guess) {
+    socket.SendTo(address, data, size);
+    if (!guess || address.v6 || rc::IsPrivateLan(address.ip)) return;
+    for (const int delta : {1, 2, 3, 4, -1}) {
+        rc::NetAddress nearby = address;
+        nearby.port = uint16_t(address.port + delta);
+        socket.SendTo(nearby, data, size);
+    }
+}
+
+nlohmann::json OwnCandidates(uint16_t port, bool dual_stack) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const auto& interface : rc::ListInterfaces()) {
+        if (!interface.isVirtual) out.push_back(rc::NetAddress{interface.ip, port}.ToString());
+    }
+    if (dual_stack) {
+        for (const auto& address : rc::ListGlobalIpv6(port)) out.push_back(address.ToString());
+    }
+    return out;
+}
+
+void AppendEndpoint(std::vector<rc::NetAddress>& out, const rc::NetAddress& address, bool dual_stack) {
+    if (!address.valid() || (address.v6 && !dual_stack) || out.size() >= 32) return;
+    if (std::find(out.begin(), out.end(), address) == out.end()) out.push_back(address);
+}
+
+void AppendEndpoints(std::vector<rc::NetAddress>& out, const nlohmann::json& values, bool dual_stack) {
+    if (!values.is_array()) return;
+    for (const auto& value : values) {
+        if (!value.is_string() || out.size() >= 32) continue;
+        rc::NetAddress address;
+        if (rc::NetAddress::ParseEndpoint(value.get<std::string>(), address)) AppendEndpoint(out, address, dual_stack);
+    }
+}
+
+void ClearSecret(std::string& value) {
+    if (!value.empty()) rc::crypto::Wipe(value.data(), value.size());
+    value.clear();
+}
+void ClearSecret(std::vector<uint8_t>& value) {
+    if (!value.empty()) rc::crypto::Wipe(value.data(), value.size());
+    value.clear();
 }
 
 nlohmann::json ParsedObject(std::string_view text) {
@@ -139,6 +191,15 @@ bool Session::connect(const rc::NetAddress& endpoint, std::string name) {
     m_connection.reset();
     m_socket.Close();
     m_target.reset();
+    m_remote = false;
+    m_remote_session.clear();
+    m_rendezvous.clear();
+    m_pc_addresses.clear();
+    m_peers.clear();
+    m_remote_registered = false;
+    m_last_register_ns = 0;
+    m_last_path_probe_ns = 0;
+    clear_remote_secrets();
     m_monitors.clear();
     m_streams.clear();
     m_reassemblers.clear();
@@ -191,10 +252,225 @@ bool Session::connect(const rc::NetAddress& endpoint, std::string name) {
     return true;
 }
 
+bool Session::connect_remote(const nlohmann::json& offer) {
+    if (!offer.is_object()) {
+        set_state(State::Failed, "Invalid RinCast connection offer");
+        return false;
+    }
+    const auto string_field = [&](const char* name) -> std::string {
+        if (!offer.contains(name) || !offer[name].is_string()) return {};
+        return offer[name].get<std::string>();
+    };
+
+    const std::string session_id = string_field("sessionId");
+    const std::string connect_secret = string_field("connectSecret");
+    std::string relay_token = string_field("relayToken");
+    if (relay_token.empty()) relay_token = string_field("sessionToken");
+    if (session_id.empty() || session_id.size() > 256 || connect_secret.empty() || connect_secret.size() > 512 ||
+        relay_token.empty() || relay_token.size() > 512) {
+        set_state(State::Failed, "RinCast connection offer is missing credentials");
+        return false;
+    }
+
+    std::vector<rc::NetAddress> rendezvous;
+    if (!offer.contains("rendezvous")) {
+        set_state(State::Failed, "RinCast connection offer is missing rendezvous");
+        return false;
+    }
+    const auto& rv = offer["rendezvous"];
+    if (rv.is_object()) {
+        if (!rv.contains("host") || !rv["host"].is_string() || !rv.contains("port") || !rv["port"].is_number_integer()) {
+            set_state(State::Failed, "Invalid RinCast rendezvous endpoint");
+            return false;
+        }
+        const int port = rv["port"].get<int>();
+        if (port <= 0 || port > 65535) {
+            set_state(State::Failed, "Invalid RinCast rendezvous endpoint");
+            return false;
+        }
+        rendezvous = rc::NetAddress::ResolveAll(rv["host"].get<std::string>(), uint16_t(port));
+    } else if (rv.is_array()) {
+        AppendEndpoints(rendezvous, rv, true);
+    }
+    if (rendezvous.empty()) {
+        set_state(State::Failed, "Cannot resolve the RinCast rendezvous endpoint");
+        return false;
+    }
+
+    if (m_connection) release_controls();
+    if (m_connection) m_connection->SendDisconnect();
+    m_connection.reset();
+    m_socket.Close();
+    m_target.reset();
+    m_monitors.clear();
+    m_streams.clear();
+    m_reassemblers.clear();
+    m_last_good_frame.clear();
+    m_pending_keyframe.clear();
+    m_waiting_recovery.clear();
+    m_server_info = nlohmann::json::object();
+    m_server_settings = nlohmann::json::object();
+    m_pc_addresses.clear();
+    m_peers.clear();
+    clear_remote_secrets();
+
+    std::string error;
+    if (!open_stream_socket(error)) {
+        set_state(State::Failed, error);
+        return false;
+    }
+    const bool dual_stack = m_socket.DualStack();
+    if (!dual_stack) {
+        std::erase_if(rendezvous, [](const rc::NetAddress& address) { return address.v6; });
+        if (rendezvous.empty()) {
+            m_socket.Close();
+            set_state(State::Failed, "The RinCast rendezvous is IPv6-only on this network");
+            return false;
+        }
+    }
+
+    m_remote = true;
+    m_remote_session = session_id;
+    m_connect_secret = connect_secret;
+    m_relay_token = relay_token;
+    m_rendezvous = std::move(rendezvous);
+    m_remote_registered = false;
+    m_last_register_ns = 0;
+    m_last_path_probe_ns = 0;
+    const std::string offered_name = string_field("pcName");
+    m_target_name = offered_name.empty() ? "RinCast PC" : offered_name;
+    if (offer.contains("pcLocalAddrs")) AppendEndpoints(m_pc_addresses, offer["pcLocalAddrs"], dual_stack);
+    if (offer.contains("candidates")) AppendEndpoints(m_pc_addresses, offer["candidates"], dual_stack);
+
+    m_keys = rc::crypto::KeyPair::Generate();
+    uint8_t nonce[16];
+    rc::RandomBytes(nonce, sizeof(nonce));
+    m_client_nonce = rc::HexEncode(nonce, sizeof(nonce));
+
+    nlohmann::json hello = {{"deviceId", m_device_id},
+                            {"deviceName", m_config.device_name},
+                            {"model", m_config.model},
+                            {"appVersion", m_config.app_version},
+                            {"nonce", m_client_nonce},
+                            {"display", m_config.display},
+                            {"decoders", m_config.decoders},
+                            {"settings", m_config.settings},
+                            {"cloudSession", m_remote_session},
+                            {"proof", rc::HelloProof(m_connect_secret, m_keys.publicKey)}};
+    const auto identity_key = rc::crypto::IdentityPublicKey(m_identity);
+    const auto signature = rc::crypto::SignConnection(m_identity, m_keys.publicKey, m_client_nonce);
+    hello["deviceKey"] = rc::HexEncode(identity_key.data(), identity_key.size());
+    hello["deviceSig"] = rc::HexEncode(signature.data(), signature.size());
+
+    m_hello = {};
+    m_hello.type = rc::PacketType::Hello;
+    m_hello.publicKey = m_keys.publicKey;
+    m_hello.json = hello.dump();
+    m_hello_bytes = rc::BuildHandshake(m_hello);
+
+    const nlohmann::json register_message = {{"op", "register"},
+                                             {"session", m_remote_session},
+                                             {"role", 1},
+                                             {"token", m_relay_token},
+                                             {"candidates", OwnCandidates(m_socket.LocalPort(), dual_stack)}};
+    const std::string register_json = "RCRV" + register_message.dump();
+    m_register_bytes.assign(register_json.begin(), register_json.end());
+
+    const int64_t now = rc::NowNs();
+    m_session_start_ns = now;
+    m_deadline_ns = now + kConnectTimeoutNs;
+    m_last_hello_ns = 0;
+    m_last_feedback_ns = now;
+    m_feedback_now = false;
+    set_state(State::Connecting, "Connecting to " + m_target_name + " through RinCast...");
+    send_remote_register(now);
+    send_remote_hellos(now);
+    return true;
+}
+
 void Session::send_hello(int64_t now_ns) {
+    if (m_remote) {
+        send_remote_hellos(now_ns);
+        return;
+    }
     if (!m_target || m_hello_bytes.empty()) return;
     m_socket.SendTo(*m_target, m_hello_bytes.data(), m_hello_bytes.size());
     m_last_hello_ns = now_ns;
+}
+
+void Session::clear_remote_secrets() {
+    crypto_wipe(m_connect_secret.data(), m_connect_secret.size());
+    crypto_wipe(m_relay_token.data(), m_relay_token.size());
+    crypto_wipe(m_register_bytes.data(), m_register_bytes.size());
+    m_connect_secret.clear();
+    m_relay_token.clear();
+    m_register_bytes.clear();
+    m_last_path_switch_ns = 0;
+}
+
+void Session::send_remote_register(int64_t now_ns) {
+    if (!m_remote || m_register_bytes.empty() || m_rendezvous.empty()) return;
+    const int64_t interval = m_remote_registered ? 3'000'000'000LL : 300'000'000LL;
+    if (m_last_register_ns && now_ns - m_last_register_ns < interval) return;
+    for (const auto& address : m_rendezvous) m_socket.SendTo(address, m_register_bytes.data(), m_register_bytes.size());
+    m_last_register_ns = now_ns;
+}
+
+void Session::send_remote_hellos(int64_t now_ns) {
+    if (!m_remote || m_hello_bytes.empty()) return;
+    const bool guess_ports = now_ns - m_session_start_ns < 10'000'000'000LL;
+    for (const auto& address : m_pc_addresses) {
+        SendWithPortGuesses(m_socket, address, m_hello_bytes.data(), m_hello_bytes.size(), false);
+    }
+    for (const auto& address : m_peers) {
+        SendWithPortGuesses(m_socket, address, m_hello_bytes.data(), m_hello_bytes.size(), guess_ports);
+    }
+    m_last_hello_ns = now_ns;
+}
+
+void Session::handle_rendezvous(const uint8_t* data, size_t size, const rc::NetAddress& from) {
+    if (!m_remote || size <= 4 || std::find(m_rendezvous.begin(), m_rendezvous.end(), from) == m_rendezvous.end()) return;
+    nlohmann::json message = nlohmann::json::parse(reinterpret_cast<const char*>(data) + 4,
+                                                   reinterpret_cast<const char*>(data) + size, nullptr, false);
+    if (!message.is_object() || !message.contains("op") || !message["op"].is_string() ||
+        message["op"] != "registered" || (message.contains("session") && message["session"] != m_remote_session)) {
+        return;
+    }
+
+    bool added = false;
+    const bool dual_stack = m_socket.DualStack();
+    auto add_endpoint = [&](const nlohmann::json& value) {
+        if (!value.is_string() || m_peers.size() >= 32) return;
+        rc::NetAddress address;
+        if (!rc::NetAddress::ParseEndpoint(value.get<std::string>(), address)) return;
+        if (address.v6 && !dual_stack) return;
+        if (std::find(m_peers.begin(), m_peers.end(), address) == m_peers.end()) {
+            m_peers.push_back(address);
+            added = true;
+        }
+    };
+    if (message.contains("peer")) add_endpoint(message["peer"]);
+    if (message.contains("peers") && message["peers"].is_array()) {
+        for (const auto& peer : message["peers"]) add_endpoint(peer);
+    }
+    m_remote_registered = true;
+    if (added) send_remote_hellos(rc::NowNs());
+}
+
+void Session::probe_remote_paths(int64_t now_ns) {
+    if (!m_remote || !m_connection) return;
+    const int64_t interval = now_ns - m_session_start_ns < 10'000'000'000LL ? 500'000'000LL : 5'000'000'000LL;
+    if (m_last_path_probe_ns && now_ns - m_last_path_probe_ns < interval) return;
+    m_last_path_probe_ns = now_ns;
+
+    const int current = PathRank(m_connection->Remote());
+    if (current >= 3) return;
+    for (const auto& address : m_pc_addresses) {
+        if (PathRank(address) > current) m_socket.SendTo(address, m_hello_bytes.data(), m_hello_bytes.size());
+    }
+    for (const auto& address : m_peers) {
+        if (PathRank(address) > current) m_socket.SendTo(address, m_hello_bytes.data(), m_hello_bytes.size());
+    }
 }
 
 void Session::pump() {
@@ -262,6 +538,7 @@ void Session::pump_discovery(int64_t now_ns) {
 }
 
 void Session::pump_handshake(int64_t now_ns) {
+    if (m_remote) send_remote_register(now_ns);
     if (now_ns - m_last_hello_ns >= kHelloIntervalNs) send_hello(now_ns);
 
     uint8_t buffer[2048];
@@ -269,6 +546,10 @@ void Session::pump_handshake(int64_t now_ns) {
     for (int packet = 0; packet < 32 && m_state != State::Connected; ++packet) {
         const int size = m_socket.RecvFrom(buffer, sizeof(buffer), from, 0);
         if (size <= 0) break;
+        if (size >= 4 && std::memcmp(buffer, "RCRV", 4) == 0) {
+            handle_rendezvous(buffer, size_t(size), from);
+            continue;
+        }
         handle_handshake(buffer, size_t(size), from, now_ns);
         if (m_state == State::Failed) break;
     }
@@ -276,7 +557,9 @@ void Session::pump_handshake(int64_t now_ns) {
     if (m_state != State::Connected && m_state != State::Failed && now_ns > m_deadline_ns) {
         const std::string timeout = m_state == State::WaitingApproval
                                         ? "Approval timed out on the host"
-                                        : "The host did not respond";
+                                        : m_remote ? (m_remote_registered ? "No direct route to the PC was possible"
+                                                                         : "The RinCast rendezvous did not respond")
+                                                   : "The host did not respond";
         set_state(State::Failed, timeout);
         m_socket.Close();
         m_target.reset();
@@ -285,11 +568,12 @@ void Session::pump_handshake(int64_t now_ns) {
         m_socket.Close();
         m_target.reset();
         m_hello_bytes.clear();
+        clear_remote_secrets();
     }
 }
 
 void Session::handle_handshake(const uint8_t* data, size_t size, const rc::NetAddress& from, int64_t now_ns) {
-    if (!m_target || !SamePeer(from, *m_target)) return;
+    if (!m_remote && (!m_target || !SamePeer(from, *m_target))) return;
 
     rc::HandshakePacket reply;
     if (!rc::ParseHandshake(data, size, reply)) return;
@@ -312,22 +596,37 @@ void Session::handle_handshake(const uint8_t* data, size_t size, const rc::NetAd
     if (!welcome.contains("nonce") || !welcome["nonce"].is_string()) return;
     const std::string server_nonce = welcome["nonce"].get<std::string>();
     if (server_nonce.empty()) return;
+    if (m_remote) {
+        const std::string expected = rc::WelcomeProof(m_connect_secret, reply.publicKey, m_keys.publicKey);
+        if (!welcome.contains("proof") || !welcome["proof"].is_string() ||
+            welcome["proof"].get<std::string>() != expected) {
+            RC_LOGW("Ignored remote Welcome with an invalid proof");
+            return;
+        }
+    }
 
     const auto keys = rc::crypto::DeriveSessionKeys(
         m_keys.secretKey, reply.publicKey, m_keys.publicKey, reply.publicKey,
-        rc::SessionContext(m_client_nonce, server_nonce, ""));
+        rc::SessionContext(m_client_nonce, server_nonce, m_remote ? m_connect_secret : ""));
+    const bool vpn = !m_remote && !from.v6 && rc::RoutesThroughTunnel(from.ip);
     auto connection = std::make_unique<rc::Connection>(&m_socket, from, reply.sessionId, keys, false,
-                                                       rc::kMaxDatagramLan);
+                                                       m_remote || vpn ? rc::kMaxDatagramWan : rc::kMaxDatagramLan);
     connection->SetControlHandler([this](const std::string& text) { handle_control(text); });
     connection->SetPacketHandler(
         [this](rc::PacketType type, const uint8_t* payload, size_t payload_size) {
             handle_packet(type, payload, payload_size);
         });
 
-    m_target_name = welcome.value("name", m_target_name);
+    if (welcome.contains("name") && welcome["name"].is_string()) m_target_name = welcome["name"].get<std::string>();
     m_connection = std::move(connection);
     m_last_feedback_ns = now_ns;
+    m_last_path_probe_ns = now_ns;
     set_state(State::Connected, "Connected to " + m_target_name);
+
+    if (m_remote) {
+        ClearSecret(m_relay_token);
+        ClearSecret(m_register_bytes);
+    }
 
     send_client_info();
     // Upstream starts VR for every client.info. Stop that pipeline immediately so this desktop
@@ -354,12 +653,33 @@ void Session::pump_session(int64_t now_ns) {
     for (int packet = 0; packet < 128; ++packet) {
         const int size = m_socket.RecvFrom(buffer, sizeof(buffer), from, 0);
         if (size <= 0) break;
-        if (rc::IsHandshakeDatagram(buffer, size_t(size))) continue;
+        if (size >= 4 && std::memcmp(buffer, "RCRV", 4) == 0) {
+            handle_rendezvous(buffer, size_t(size), from);
+            continue;
+        }
+        if (rc::IsHandshakeDatagram(buffer, size_t(size))) {
+            if (m_remote && (!m_last_path_switch_ns || now_ns - m_last_path_switch_ns >= 5'000'000'000LL)) {
+                rc::HandshakePacket late;
+                if (rc::ParseHandshake(buffer, size_t(size), late) && late.type == rc::PacketType::Welcome &&
+                    late.sessionId == m_connection->SessionId() && PathRank(from) > PathRank(m_connection->Remote())) {
+                    const auto welcome = ParsedObject(late.json);
+                    const std::string expected = rc::WelcomeProof(m_connect_secret, late.publicKey, m_keys.publicKey);
+                    if (welcome.contains("proof") && welcome["proof"].is_string() &&
+                        welcome["proof"].get<std::string>() == expected) {
+                        RC_LOGI("Switching to the better remote path %s", from.ToString().c_str());
+                        m_connection->SetRemote(from);
+                        m_last_path_switch_ns = now_ns;
+                    }
+                }
+            }
+            continue;
+        }
         m_connection->HandleDatagram(buffer, size_t(size), from);
         if (m_connection->PeerDisconnected()) break;
     }
 
     m_connection->Tick(now_ns);
+    probe_remote_paths(now_ns);
     const bool urgent = m_feedback_now && now_ns - m_last_feedback_ns >= 5'000'000LL;
     if (urgent || now_ns - m_last_feedback_ns >= 100'000'000LL) send_feedback(now_ns);
 
@@ -369,9 +689,12 @@ void Session::pump_session(int64_t now_ns) {
         m_connection.reset();
         m_socket.Close();
         m_target.reset();
+        m_pc_addresses.clear();
+        m_peers.clear();
         m_reassemblers.clear();
         m_waiting_recovery.clear();
         m_streams.clear();
+        clear_remote_secrets();
         set_state(State::Failed, remote ? "The host ended the session" : "Connection lost");
     }
 }
@@ -721,6 +1044,7 @@ void Session::cancel() {
     }
     m_socket.Close();
     m_target.reset();
+    clear_remote_secrets();
     set_state(State::Idle, m_config.discover ? "Searching for LAN hosts..." : "LAN discovery is disabled");
 }
 
@@ -730,6 +1054,7 @@ void Session::disconnect() {
     m_connection.reset();
     m_socket.Close();
     m_target.reset();
+    clear_remote_secrets();
     m_monitors.clear();
     m_streams.clear();
     m_reassemblers.clear();

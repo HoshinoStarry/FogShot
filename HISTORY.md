@@ -16,3 +16,5 @@
 - 首轮 Windows x64、ARM64 已生成经架构校验的便携包。macOS 通用应用已编译，校验命令因 `lipo` 参数顺序失败，已修正命令。
 - Android SDK 安装完成后，Maven Central 对 CI Runner 返回 HTTP 429。Android CI 优先使用 Google Cloud 的 Maven Central 镜像，保留 Gradle Plugin Portal 和 Google Maven。
 - macOS 通用包随后通过 x64 与 ARM64 校验并上传。iOS 已进入链接阶段，补上 miniaudio 所用的 Objective-C 运行时和系统框架，并保留详细构建日志。
+- iOS ARM64 真机包已通过编译和架构校验。Android 原生钩子误选已预装的 NDK 27.3，ARM64 的 libyuv 编译报错。原生钩子固定使用和 Flutter Gradle 配置相同的 NDK 28.2，本机已用该版本编出 ARMv7 和 ARM64 原生库。
+- 添加 RinCast 设备码授权、凭据安全存储、同账号主机列表与 UDP 引介。用独立的 RinCast 服务与测试 Streamer 通过设备码批准、账号主机查询和连接申请。清空直连候选后，FogShot 仍通过引介建连并解码 30 帧 2560×1600 桌面画面，测试 Streamer 记录了键鼠与中文文本回传。该测试在同一台 Windows 机器上运行。

@@ -23,7 +23,7 @@ using nlohmann::json;
 
 namespace {
 
-enum class CommandKind { Connect, Disconnect, Display, Mute, Text, Pointer, Button, Wheel, Key, Release };
+enum class CommandKind { Connect, Disconnect, Display, Mute, Text, Remote, Pointer, Button, Wheel, Key, Release };
 
 struct Command {
     CommandKind kind;
@@ -201,6 +201,11 @@ void RcdClient::run(rincast::SessionConfig config) {
                     break;
                 case CommandKind::Mute: media.SetMuted(command.down); break;
                 case CommandKind::Text: session.text(command.text); break;
+                case CommandKind::Remote: {
+                    const auto offer = json::parse(command.text, nullptr, false);
+                    if (offer.is_object()) session.connect_remote(offer);
+                    break;
+                }
                 case CommandKind::Pointer: if (streamId) session.pointer(streamId, command.x, command.y); break;
                 case CommandKind::Button: session.mouse_button(command.code, command.down); break;
                 case CommandKind::Wheel: session.mouse_wheel(command.x, command.y); break;
@@ -225,6 +230,7 @@ void RcdClient::run(rincast::SessionConfig config) {
             for (const auto& item : monitors)
                 displays.push_back({{"id", item.id}, {"name", item.name}, {"width", item.width}, {"height", item.height}});
             std::string updated = json{{"state", int(session.state())}, {"status", session.status()},
+                                       {"deviceId", session.device_id()},
                                        {"discover", discover}, {"hosts", std::move(hosts)},
                                        {"displays", std::move(displays)}, {"display", monitorId}, {"notice", notice},
                                        {"generation", generation}, {"decoded", decoded}, {"audioPackets", audioPackets}}
@@ -252,7 +258,7 @@ RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mob
 void rcd_destroy(RcdClient* client) { delete client; }
 
 void rcd_command(RcdClient* client, int32_t kind, const char* value, int32_t flag) {
-    if (!client || kind < 0 || kind > int(CommandKind::Text)) return;
+    if (!client || kind < 0 || kind > int(CommandKind::Remote)) return;
     client->enqueue({static_cast<CommandKind>(kind), value ? value : "", 0, flag != 0});
 }
 

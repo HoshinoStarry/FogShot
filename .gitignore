@@ -1,5 +1,6 @@
 /.dart_tool/
 /.flutter-plugins-dependencies
+/dist/
 /.metadata-local/
 /build*/
 /coverage/

@@ -9,12 +9,16 @@ class Lobby extends StatefulWidget {
     required this.onConnect,
     required this.onCancel,
     this.initialAddress = '',
+    this.account,
+    this.requestingRemote = false,
   });
 
   final ClientState state;
   final ValueChanged<String>? onConnect;
   final VoidCallback onCancel;
   final String initialAddress;
+  final Widget? account;
+  final bool requestingRemote;
 
   @override
   State<Lobby> createState() => _LobbyState();
@@ -23,6 +27,7 @@ class Lobby extends StatefulWidget {
 class _LobbyState extends State<Lobby> {
   final _form = GlobalKey<FormState>();
   late final _address = TextEditingController(text: widget.initialAddress);
+  bool get _pending => widget.state.pending || widget.requestingRemote;
 
   @override
   void dispose() {
@@ -31,7 +36,7 @@ class _LobbyState extends State<Lobby> {
   }
 
   void _submit() {
-    if (widget.state.pending ||
+    if (_pending ||
         widget.onConnect == null ||
         !_form.currentState!.validate()) {
       return;
@@ -58,12 +63,14 @@ class _LobbyState extends State<Lobby> {
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
     final state = widget.state;
-    final status = switch (state.phase) {
-      Phase.approval => '请在主机上的 RinCast Streamer 中允许配对。',
-      Phase.connecting => '正在连接主机…',
-      Phase.failed => state.status,
-      _ => null,
-    };
+    final status = widget.requestingRemote
+        ? '正在获取主机连接信息…'
+        : switch (state.phase) {
+            Phase.approval => '请在主机上的 RinCast Streamer 中允许配对。',
+            Phase.connecting => '正在连接主机…',
+            Phase.failed => state.status,
+            _ => null,
+          };
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -112,6 +119,10 @@ class _LobbyState extends State<Lobby> {
                   '连接 RinCast Streamer，查看并控制远程桌面。',
                   style: theme.textTheme.bodyLarge,
                 ),
+                if (widget.account case final account?) ...[
+                  const SizedBox(height: 24),
+                  account,
+                ],
                 const SizedBox(height: 36),
                 Text('主机地址', style: theme.textTheme.titleMedium),
                 const SizedBox(height: 10),
@@ -123,7 +134,7 @@ class _LobbyState extends State<Lobby> {
                       Expanded(
                         child: TextFormField(
                           controller: _address,
-                          enabled: !state.pending,
+                          enabled: !_pending,
                           validator: _validate,
                           onFieldSubmitted: (_) => _submit(),
                           keyboardType: TextInputType.url,
@@ -140,10 +151,10 @@ class _LobbyState extends State<Lobby> {
                       SizedBox(
                         height: 56,
                         child: FilledButton(
-                          onPressed: state.pending
+                          onPressed: _pending
                               ? widget.onCancel
                               : (widget.onConnect == null ? null : _submit),
-                          child: Text(state.pending ? '取消' : '连接'),
+                          child: Text(_pending ? '取消' : '连接'),
                         ),
                       ),
                     ],
@@ -196,10 +207,7 @@ class _LobbyState extends State<Lobby> {
                         trailing: host.busy
                             ? const Text('忙碌')
                             : const Icon(Icons.chevron_right),
-                        onTap:
-                            state.pending ||
-                                host.busy ||
-                                widget.onConnect == null
+                        onTap: _pending || host.busy || widget.onConnect == null
                             ? null
                             : () {
                                 FocusScope.of(context).unfocus();

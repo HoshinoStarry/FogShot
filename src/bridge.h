@@ -26,7 +26,8 @@ typedef struct {
 RCD_EXPORT RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mobile);
 RCD_EXPORT void rcd_destroy(RcdClient* client);
 
-// Commands: 0 connect (IPv4[:port]), 1 disconnect, 2 display ID, 3 mute (value 0/1), 4 UTF-8 text.
+// Commands: 0 connect (IPv4[:port]), 1 disconnect, 2 display ID, 3 mute (value 0/1),
+// 4 UTF-8 text, 5 remote connect (RinCast /connect JSON offer).
 RCD_EXPORT void rcd_command(RcdClient* client, int32_t kind, const char* text, int32_t value);
 // Events: 0 pointer (x/y = normalized coordinates), 1 button, 2 scroll (x/y = steps), 3 VK, 4 release inputs.
 RCD_EXPORT void rcd_input(RcdClient* client, int32_t kind, int32_t code, int32_t down, float x, float y);
