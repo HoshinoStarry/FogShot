@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -31,6 +32,8 @@ class StreamView extends StatefulWidget {
 }
 
 class _StreamViewState extends State<StreamView> {
+  static const _idleHideDelay = Duration(seconds: 3);
+
   final _focus = FocusNode(debugLabel: 'Remote input');
   final _text = TextEditingController();
   final _touches = <int, ({Offset start, Offset last, Duration since})>{};
@@ -50,14 +53,79 @@ class _StreamViewState extends State<StreamView> {
   bool _showNetwork = false;
   bool _virtualKeyboard = false;
   bool _requestingMic = false;
+  bool _menuOpen = false;
+  Timer? _hideTimer;
 
   Client get client => widget.client;
 
   @override
+  void initState() {
+    super.initState();
+    _scheduleIdleHide();
+  }
+
+  @override
   void dispose() {
+    _hideTimer?.cancel();
     _focus.dispose();
     _text.dispose();
     super.dispose();
+  }
+
+  void _scheduleIdleHide() {
+    _hideTimer?.cancel();
+    if (!mounted ||
+        !_controls ||
+        _menuOpen ||
+        _compose ||
+        _virtualKeyboard ||
+        _showNetwork ||
+        _requestingMic) {
+      return;
+    }
+    _hideTimer = Timer(_idleHideDelay, () {
+      if (!mounted ||
+          !_controls ||
+          _menuOpen ||
+          _compose ||
+          _virtualKeyboard ||
+          _showNetwork ||
+          _requestingMic) {
+        return;
+      }
+      if (_touches.isNotEmpty || _mouse != 0) {
+        _scheduleIdleHide();
+        return;
+      }
+      setState(() => _controls = false);
+    });
+  }
+
+  void _showControls() {
+    _hideTimer?.cancel();
+    if (!_controls) setState(() => _controls = true);
+    _scheduleIdleHide();
+  }
+
+  void _hideControls() {
+    _hideTimer?.cancel();
+    _release();
+    setState(() {
+      _controls = false;
+      _compose = false;
+      _showNetwork = false;
+      _virtualKeyboard = false;
+    });
+  }
+
+  void _openMenu() {
+    _hideTimer?.cancel();
+    _menuOpen = true;
+  }
+
+  void _closeMenu() {
+    _menuOpen = false;
+    _scheduleIdleHide();
   }
 
   void _release() {
@@ -73,6 +141,7 @@ class _StreamViewState extends State<StreamView> {
     if (_compose || vk == null || event.synthesized) {
       return KeyEventResult.ignored;
     }
+    if (event is! KeyUpEvent) _showControls();
     client.key(vk, event is! KeyUpEvent);
     return KeyEventResult.handled;
   }
@@ -168,6 +237,11 @@ class _StreamViewState extends State<StreamView> {
       _compose = !_compose;
       _virtualKeyboard = false;
     });
+    if (_compose) {
+      _hideTimer?.cancel();
+    } else {
+      _scheduleIdleHide();
+    }
     if (!_compose) _focus.requestFocus();
   }
 
@@ -182,6 +256,11 @@ class _StreamViewState extends State<StreamView> {
       _virtualKeyboard = !_virtualKeyboard;
       _compose = false;
     });
+    if (_virtualKeyboard) {
+      _hideTimer?.cancel();
+    } else {
+      _scheduleIdleHide();
+    }
   }
 
   Future<void> _toggleMicrophone() async {
@@ -191,6 +270,7 @@ class _StreamViewState extends State<StreamView> {
     }
     if (_requestingMic) return;
     _requestingMic = true;
+    _hideTimer?.cancel();
     final granted = await requestMicrophonePermission();
     _requestingMic = false;
     if (!mounted) return;
@@ -200,6 +280,7 @@ class _StreamViewState extends State<StreamView> {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('需要麦克风权限才能回传声音。')));
     }
+    _scheduleIdleHide();
   }
 
   Widget _streams() {
@@ -304,6 +385,9 @@ class _StreamViewState extends State<StreamView> {
               child: Listener(
                 behavior: HitTestBehavior.opaque,
                 onPointerDown: (event) {
+                  if (event.kind == ui.PointerDeviceKind.mouse) {
+                    _showControls();
+                  }
                   if (!_compose && !_virtualKeyboard) _focus.requestFocus();
                   if (event.kind == ui.PointerDeviceKind.mouse) {
                     _mouseEvent(event, size, streamId);
@@ -328,6 +412,7 @@ class _StreamViewState extends State<StreamView> {
                 onPointerCancel: (_) => _release(),
                 onPointerSignal: (event) {
                   if (event is PointerScrollEvent) {
+                    _showControls();
                     _move(event.localPosition, size, streamId);
                     client.scroll(
                       event.scrollDelta.dx / 55,
@@ -398,26 +483,25 @@ class _StreamViewState extends State<StreamView> {
         .where((item) => item.id == state.display)
         .firstOrNull;
     return Material(
-      color: const Color(0xff181c22),
+      key: const ValueKey('stream-toolbar'),
+      color: const Color(0xf2181c22),
+      elevation: 14,
+      shadowColor: Colors.black,
+      borderRadius: BorderRadius.circular(22),
+      clipBehavior: Clip.antiAlias,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: palette.outlineVariant)),
+          border: Border.all(
+            color: palette.outlineVariant.withValues(alpha: 0.6),
+          ),
+          borderRadius: BorderRadius.circular(22),
         ),
         child: SizedBox(
-          height: Client.mobile ? 48 : 40,
+          height: Client.mobile ? 48 : 42,
           child: LayoutBuilder(
             builder: (context, bounds) {
-              final wide = bounds.maxWidth >= 540;
-              final compact = bounds.maxWidth < 360;
-              void hideControls() {
-                _release();
-                setState(() {
-                  _controls = false;
-                  _compose = false;
-                  _showNetwork = false;
-                  _virtualKeyboard = false;
-                });
-              }
+              final wide = bounds.maxWidth >= 520;
+              final compact = bounds.maxWidth < 340;
 
               void toggleMute() {
                 setState(() => _muted = !_muted);
@@ -431,14 +515,17 @@ class _StreamViewState extends State<StreamView> {
                       context,
                       Icons.keyboard_arrow_up,
                       '隐藏工具栏',
-                      hideControls,
+                      _hideControls,
                     ),
                   Expanded(
                     child: PopupMenuButton<String>(
                       tooltip: '切换显示器',
+                      onOpened: _openMenu,
+                      onCanceled: _closeMenu,
                       initialValue: state.allDisplays ? '' : state.display,
                       enabled: state.displays.length > 1,
                       onSelected: (id) {
+                        _closeMenu();
                         _release();
                         if (id.isEmpty) {
                           client.showAllDisplays();
@@ -499,8 +586,10 @@ class _StreamViewState extends State<StreamView> {
                               ? palette.primary
                               : palette.onSurface,
                         ),
-                        onPressed: () =>
-                            setState(() => _showNetwork = !_showNetwork),
+                        onPressed: () {
+                          setState(() => _showNetwork = !_showNetwork);
+                          _scheduleIdleHide();
+                        },
                         icon: const Icon(Icons.network_check, size: 17),
                         label: Text(
                           wide && state.network.rttMs != null
@@ -514,6 +603,8 @@ class _StreamViewState extends State<StreamView> {
                   ),
                   PopupMenuButton<int>(
                     tooltip: '远程输入',
+                    onOpened: _openMenu,
+                    onCanceled: _closeMenu,
                     iconSize: 19,
                     padding: const EdgeInsets.all(6),
                     icon: Icon(
@@ -533,6 +624,7 @@ class _StreamViewState extends State<StreamView> {
                       ),
                     ],
                     onSelected: (choice) {
+                      _closeMenu();
                       if (choice == 0) {
                         _toggleVirtualKeyboard();
                       } else {
@@ -566,6 +658,8 @@ class _StreamViewState extends State<StreamView> {
                   ] else ...[
                     PopupMenuButton<int>(
                       tooltip: '更多串流操作',
+                      onOpened: _openMenu,
+                      onCanceled: _closeMenu,
                       iconSize: 19,
                       padding: const EdgeInsets.all(6),
                       itemBuilder: (_) => [
@@ -583,6 +677,7 @@ class _StreamViewState extends State<StreamView> {
                         ],
                       ],
                       onSelected: (choice) {
+                        _closeMenu();
                         switch (choice) {
                           case 0:
                             _toggleMicrophone();
@@ -591,7 +686,7 @@ class _StreamViewState extends State<StreamView> {
                           case 2:
                             toggleMute();
                           case 3:
-                            hideControls();
+                            _hideControls();
                         }
                       },
                     ),
@@ -605,7 +700,6 @@ class _StreamViewState extends State<StreamView> {
                   ),
                   _action(context, Icons.link_off, '断开连接', () {
                     _release();
-                    client.mute(false);
                     client.disconnect();
                   }, color: palette.error),
                   const SizedBox(width: 3),
@@ -660,6 +754,9 @@ class _StreamViewState extends State<StreamView> {
 
   @override
   Widget build(BuildContext context) {
+    final viewportWidth = MediaQuery.sizeOf(context).width;
+    final networkUsesAvailableWidth = Client.mobile || viewportWidth < 400;
+    final networkPanelWidth = (viewportWidth - 18).clamp(0.0, 360.0).toDouble();
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -672,20 +769,74 @@ class _StreamViewState extends State<StreamView> {
           },
           child: Column(
             children: [
-              if (_controls) _toolbar(context),
               Expanded(
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    _streams(),
+                    MouseRegion(
+                      onHover: (_) => _showControls(),
+                      child: SizedBox.expand(
+                        key: const ValueKey('stream-video-area'),
+                        child: _streams(),
+                      ),
+                    ),
+                    if (_controls)
+                      Positioned(
+                        top: 8,
+                        left: 0,
+                        right: 0,
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 640),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                              child: Listener(
+                                onPointerDown: (_) => _showControls(),
+                                child: MouseRegion(
+                                  onEnter: (_) => _hideTimer?.cancel(),
+                                  onExit: (_) => _scheduleIdleHide(),
+                                  child: _toolbar(context),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!_controls)
                       Positioned(
-                        left: 8,
-                        top: 8,
-                        child: IconButton.filledTonal(
-                          tooltip: '显示工具栏',
-                          icon: const Icon(Icons.keyboard_arrow_down),
-                          onPressed: () => setState(() => _controls = true),
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: 30,
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: MouseRegion(
+                            onEnter: (_) => _showControls(),
+                            child: GestureDetector(
+                              key: const ValueKey('stream-toolbar-reveal'),
+                              behavior: HitTestBehavior.opaque,
+                              onTap: _showControls,
+                              child: SizedBox(
+                                width: 180,
+                                height: 30,
+                                child: Center(
+                                  child: Container(
+                                    width: 34,
+                                    height: 4,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.42,
+                                      ),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     if (widget.state.notice.isNotEmpty)
@@ -707,18 +858,24 @@ class _StreamViewState extends State<StreamView> {
                       ),
                     if (_showNetwork)
                       Positioned(
-                        top: 9,
+                        top: Client.mobile ? 64 : 58,
                         right: 9,
-                        left: MediaQuery.sizeOf(context).width < 400 ? 9 : null,
-                        width: MediaQuery.sizeOf(context).width < 400
+                        left: networkUsesAvailableWidth ? 9 : null,
+                        width: networkUsesAvailableWidth
                             ? null
-                            : 312,
+                            : networkPanelWidth,
                         bottom: 9,
                         child: Align(
                           alignment: Alignment.topRight,
-                          child: StreamNetworkPanel(
-                            metrics: widget.state.network,
-                            onClose: () => setState(() => _showNetwork = false),
+                          child: SizedBox(
+                            width: networkPanelWidth,
+                            child: StreamNetworkPanel(
+                              metrics: widget.state.network,
+                              onClose: () {
+                                setState(() => _showNetwork = false);
+                                _scheduleIdleHide();
+                              },
+                            ),
                           ),
                         ),
                       ),

@@ -82,6 +82,7 @@ class _SessionPageState extends State<SessionPage>
   Timer? _reconnectTimer;
   late final Ticker _ticker;
   bool _loadingFrame = false;
+  bool _shuttingDown = false;
   String _lastAddress = '';
   bool _restoringAccount = false;
   bool _requestingRemote = false;
@@ -112,8 +113,9 @@ class _SessionPageState extends State<SessionPage>
   Future<void> _start() async {
     try {
       final settings = await DesktopSettings.load();
+      if (_shuttingDown) return;
       final client = await Client.open();
-      if (!mounted) {
+      if (_shuttingDown) {
         client.dispose();
         return;
       }
@@ -133,7 +135,7 @@ class _SessionPageState extends State<SessionPage>
         _connectAddress(settings.lastAddress);
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && !_shuttingDown) {
         setState(
           () => _state = ClientState(
             phase: Phase.failed,
@@ -167,7 +169,6 @@ class _SessionPageState extends State<SessionPage>
     if (state.connected && !_ticker.isActive) _ticker.start();
     if (!state.connected && _ticker.isActive) _ticker.stop();
     if (!state.connected && _state.connected) {
-      _client?.mute(false);
       _shouldReconnect = state.phase == Phase.failed && _settings.autoReconnect;
     }
     if (state.connected && !_state.connected) {
@@ -194,6 +195,7 @@ class _SessionPageState extends State<SessionPage>
   Future<void> _restoreAccount(String deviceId) async {
     await _account.restore(deviceId);
     if (mounted &&
+        !_shuttingDown &&
         _settings.autoConnect &&
         _settings.lastPcId.isNotEmpty &&
         _connectionRequest == 0 &&
@@ -355,7 +357,9 @@ class _SessionPageState extends State<SessionPage>
         }),
       );
       final frames = decoded.nonNulls;
-      if (!mounted || !_state.connected || generation != _state.generation) {
+      if (_shuttingDown ||
+          !_state.connected ||
+          generation != _state.generation) {
         for (final (_, image) in frames) {
           image.dispose();
         }
@@ -379,6 +383,11 @@ class _SessionPageState extends State<SessionPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_shuttingDown) return;
+    if (state == AppLifecycleState.detached && !Client.mobile) {
+      _shutdown();
+      return;
+    }
     if (state != AppLifecycleState.resumed) _client?.release();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -388,24 +397,28 @@ class _SessionPageState extends State<SessionPage>
 
   @override
   Future<ui.AppExitResponse> didRequestAppExit() async {
+    _shutdown();
+    return ui.AppExitResponse.exit;
+  }
+
+  void _shutdown() {
+    if (_shuttingDown) return;
+    _shuttingDown = true;
+    ++_connectionRequest;
+    _clearReconnect();
     _poller?.cancel();
     _accountPoller?.cancel();
-    _reconnectTimer?.cancel();
     _ticker.stop();
     _client?.dispose();
     _client = null;
-    return ui.AppExitResponse.exit;
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _shutdown();
     _ticker.dispose();
-    _poller?.cancel();
-    _accountPoller?.cancel();
-    _reconnectTimer?.cancel();
     _account.dispose();
-    _client?.dispose();
     for (final image in _images.values) {
       image.dispose();
     }

@@ -116,8 +116,16 @@ class ClientState {
   bool get pending => phase == Phase.connecting || phase == Phase.approval;
 }
 
-class Client {
-  Client._(this._handle);
+class Client implements Finalizable {
+  Client._(this._handle) {
+    _finalizer.attach(this, _handle.cast(), detach: this);
+  }
+
+  static final _finalizer = NativeFinalizer(
+    Native.addressOf<NativeFunction<Void Function(Pointer<NativeClient>)>>(
+      rcd_destroy,
+    ).cast(),
+  );
 
   static bool get mobile => Platform.isIOS || Platform.isAndroid;
 
@@ -144,6 +152,7 @@ class Client {
 
   void dispose() {
     if (_handle == nullptr) return;
+    _finalizer.detach(this);
     rcd_destroy(_handle);
     _handle = nullptr;
     malloc.free(_buffer);
@@ -151,6 +160,7 @@ class Client {
   }
 
   ClientState? poll() {
+    if (_handle == nullptr) return null;
     final size = rcd_state(_handle, _buffer, _capacity);
     if (size > _capacity) {
       malloc.free(_buffer);

@@ -175,12 +175,13 @@ void RcdClient::run(rincast::SessionConfig config) {
     const auto codecs = av1 ? json::array({"h264", "av1"}) : json::array({"h264"});
     rincast::Media audio;
     if (!audio.Initialize()) throw std::runtime_error("Could not initialize media");
+    audio.SetPlaybackActive(false);
     rincast::Session session(std::move(config));
     std::map<uint8_t, VideoStream> video;
     std::string monitorId, notice;
     uint8_t focus = 0;
-    uint64_t sequence = 0, generation = 0, decoded = 0, audioPackets = 0, lastRxBytes = 0;
-    bool showAll = false, microphone = false, micSettingsDirty = false, dirty = true;
+    uint64_t sequence = 0, generation = 0, decoded = 0, audioPackets = 0;
+    bool showAll = false, microphone = false, micSettingsDirty = false, audioActive = false, dirty = true;
     std::vector<uint8_t> micPacket;
     json network = json::object();
 
@@ -220,20 +221,30 @@ void RcdClient::run(rincast::SessionConfig config) {
     rincast::Session::Callbacks callbacks;
     callbacks.on_state = [&](rincast::Session::State status, const std::string&) {
         dirty = true;
-        if (status != rincast::Session::State::Connected) {
+        if (status == rincast::Session::State::Connected) {
+            if (!audioActive) {
+                audio.Reset();
+                audio.SetMuted(false);
+                audioActive = audio.AudioAvailable();
+                audio.SetPlaybackActive(audioActive);
+            }
+        } else {
+            if (audioActive) {
+                audio.SetPlaybackActive(false);
+                audio.Reset();
+            }
+            audioActive = false;
             if (microphone) {
                 audio.StopMicrophone();
                 microphone = false;
                 micSettingsDirty = true;
             }
-            if (!video.empty() || !monitorId.empty() || showAll) {
-                monitorId.clear();
-                showAll = false;
-                notice.clear();
-                decoded = 0;
-                audioPackets = 0;
-                lastRxBytes = 0;
-                audio.Reset();
+            monitorId.clear();
+            showAll = false;
+            notice.clear();
+            decoded = 0;
+            audioPackets = 0;
+            if (!video.empty()) {
                 clearVideo();
             }
         }
@@ -300,6 +311,8 @@ void RcdClient::run(rincast::SessionConfig config) {
 
     auto nextState = std::chrono::steady_clock::now();
     auto lastSample = nextState;
+    auto connectedAt = nextState;
+    uint64_t lastRxBytes = 0, lastTxBytes = 0;
     std::vector<Command> pending;
     while (!stopping) {
         {
@@ -386,9 +399,22 @@ void RcdClient::run(rincast::SessionConfig config) {
         }
 
         const auto now = std::chrono::steady_clock::now();
+        if (!session.connected()) {
+            connectedAt = lastSample = now;
+            lastRxBytes = lastTxBytes = 0;
+            if (!network.empty()) network = json::object();
+        }
         if (session.connected() && (network.empty() || now - lastSample >= 1s)) {
             const auto health = session.health();
-            network = {{"route", health.route}, {"recovered", health.fragments_recovered}};
+            const auto& link = health.connection;
+            network = {{"route", health.route}, {"endpoint", health.remote_endpoint},
+                       {"activeSeconds", std::chrono::duration_cast<std::chrono::seconds>(now - connectedAt).count()},
+                       {"lastPacketMs", health.last_receive_age_ms}, {"clockSynchronized", health.clock_synchronized},
+                       {"bytesReceived", link.bytesReceived}, {"bytesSent", link.bytesSent},
+                       {"packetsReceived", link.packetsReceived}, {"packetsSent", link.packetsSent},
+                       {"packetsRejected", link.packetsRejected}, {"controlRetransmits", link.controlRetransmits},
+                       {"fragmentsReceived", health.fragments_received}, {"fragmentsLost", health.fragments_lost},
+                       {"recovered", health.fragments_recovered}, {"audioPackets", audioPackets}};
             if (health.connection.rttMs > 0) {
                 network["rttMs"] = health.connection.rttMs;
                 network["jitterMs"] = health.connection.rttVarMs;
@@ -396,41 +422,59 @@ void RcdClient::run(rincast::SessionConfig config) {
             const auto fragments = health.fragments_received + health.fragments_lost + health.fragments_recovered;
             if (fragments) network["lossPercent"] = double(health.fragments_lost) * 100.0 / double(fragments);
             const auto seconds = std::chrono::duration<double>(now - lastSample).count();
-            const auto rxBytes = health.connection.bytesReceived;
-            if (seconds >= 1 && rxBytes >= lastRxBytes && lastRxBytes) {
-                network["mbps"] = double(rxBytes - lastRxBytes) * 8e-6 / seconds;
+            if (seconds >= 1 && link.bytesReceived >= lastRxBytes && link.bytesSent >= lastTxBytes) {
+                network["mbps"] = double(link.bytesReceived - lastRxBytes) * 8e-6 / seconds;
+                network["uploadMbps"] = double(link.bytesSent - lastTxBytes) * 8e-6 / seconds;
             }
-            lastRxBytes = rxBytes;
+            lastRxBytes = link.bytesReceived;
+            lastTxBytes = link.bytesSent;
             uint64_t targetKbps = 0;
-            for (const auto& [id, stats] : session.stream_stats()) {
-                targetKbps += stats.target_bitrate_kbps;
-                if (id == focus && stats.server_encode_ms > 0) network["encodeMs"] = stats.server_encode_ms;
-            }
-            if (targetKbps) network["targetMbps"] = double(targetKbps) / 1000;
-            if (const auto found = video.find(focus); found != video.end()) {
-                const auto& stream = found->second;
-                if (seconds >= 1) network["fps"] = double(stream.framesThisSecond) / seconds;
-                network["width"] = stream.width() > 0 ? stream.width() : stream.config.width;
-                network["height"] = stream.height() > 0 ? stream.height() : stream.config.height;
-                network["codec"] = std::string(codecName(stream.config.codec)) + (stream.config.ten_bit ? " 10-bit" : "");
+            auto streamMetrics = json::array();
+            for (auto& [id, stream] : video) {
+                json metrics = {{"name", stream.config.name}, {"active", id == focus},
+                                {"width", stream.width() > 0 ? stream.width() : stream.config.width},
+                                {"height", stream.height() > 0 ? stream.height() : stream.config.height},
+                                {"codec", std::string(codecName(stream.config.codec)) + (stream.config.ten_bit ? " 10-bit" : "")}};
+                const auto fps = seconds >= 1 ? double(stream.framesThisSecond) / seconds : 0;
+                if (seconds >= 1) metrics["fps"] = fps;
+                if (const auto it = session.stream_stats().find(id); it != session.stream_stats().end()) {
+                    const auto& stats = it->second;
+                    if (stats.server_fps > 0) metrics["hostFps"] = stats.server_fps;
+                    if (stats.server_mbps > 0) metrics["hostMbps"] = stats.server_mbps;
+                    if (stats.server_encode_ms > 0) metrics["encodeMs"] = stats.server_encode_ms;
+                    if (stats.target_bitrate_kbps) metrics["targetMbps"] = double(stats.target_bitrate_kbps) / 1000;
+                    targetKbps += stats.target_bitrate_kbps;
+                    if (seconds >= 1) {
+                        metrics["receiveFps"] = stats.receive_fps;
+                        metrics["receiveMbps"] = stats.receive_mbps;
+                    }
+                    metrics["framesReceived"] = stats.frames_received;
+                    metrics["framesLost"] = stats.frames_lost;
+                    if (stats.frames_received) metrics["assemblyMs"] = stats.network_ms;
+                }
                 const auto report = [&](const char* name, const Average& measurement) {
-                    if (measurement.value) network[name] = *measurement.value;
+                    if (measurement.value) metrics[name] = *measurement.value;
                 };
                 report("decodeMs", stream.decode);
                 report("captureEncodeMs", stream.captureEncode);
                 report("downlinkMs", stream.downlink);
                 report("captureToDecodeMs", stream.total);
                 if (seconds >= 1 && stream.decode.value) {
-                    session.report_decode(focus, *stream.decode.value, stream.total.value.value_or(0));
-                    json stages = {{"decode", *stream.decode.value}};
-                    if (stream.captureEncode.value) stages["capture"] = *stream.captureEncode.value;
-                    if (stream.downlink.value) stages["downlink"] = *stream.downlink.value;
-                    session.send_control({{"type", rc::msg::kStats}, {"stats", {
-                        {"fps", network["fps"]}, {"latencyMs", stream.total.value.value_or(0)},
-                        {"decodeMs", *stream.decode.value}, {"latencyStages", stages}}}});
+                    session.report_decode(id, *stream.decode.value, stream.total.value.value_or(0));
+                    if (id == focus) {
+                        json stages = {{"decode", *stream.decode.value}};
+                        if (stream.captureEncode.value) stages["capture"] = *stream.captureEncode.value;
+                        if (stream.downlink.value) stages["downlink"] = *stream.downlink.value;
+                        session.send_control({{"type", rc::msg::kStats}, {"stats", {
+                            {"fps", fps}, {"latencyMs", stream.total.value.value_or(0)},
+                            {"decodeMs", *stream.decode.value}, {"latencyStages", stages}}}});
+                    }
                 }
+                streamMetrics.push_back(std::move(metrics));
+                stream.framesThisSecond = 0;
             }
-            for (auto& [id, stream] : video) stream.framesThisSecond = 0;
+            if (targetKbps) network["targetMbps"] = double(targetKbps) / 1000;
+            network["streams"] = std::move(streamMetrics);
             lastSample = now;
         }
 
@@ -459,6 +503,7 @@ void RcdClient::run(rincast::SessionConfig config) {
             nextState = now + 200ms;
         }
     }
+    audio.SetPlaybackActive(false);
     session.disconnect();
 }
 RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mobile) {

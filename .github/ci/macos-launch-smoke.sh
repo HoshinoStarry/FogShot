@@ -40,3 +40,22 @@ if [[ -z "$pid" ]] || ! kill -0 "$pid"; then
   exit 1
 fi
 echo "FogShot launched and stayed running after installation from the DMG."
+
+swift -e '
+import AppKit
+let pid = Int32(CommandLine.arguments[1])!
+guard let app = NSRunningApplication(processIdentifier: pid), app.terminate() else {
+    exit(1)
+}
+' "$pid"
+for attempt in {1..10}; do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    pid=''
+    echo 'FogShot exited after a normal quit request.'
+    exit 0
+  fi
+  sleep 1
+done
+launch_diagnostics
+echo 'FogShot did not exit after a normal quit request.' >&2
+exit 1

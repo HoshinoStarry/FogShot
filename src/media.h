@@ -46,6 +46,10 @@ class Media final {
     bool AudioAvailable() const noexcept;
     void SetMuted(bool muted) noexcept;
 
+    // Gates decoded PCM at the local playback callback. The queue is still
+    // drained while inactive so stale session audio cannot resume later.
+    void SetPlaybackActive(bool active) noexcept;
+
     // Playback gain in the inclusive range [0, 1]. This is independent of mute.
     void SetVolume(float volume) noexcept;
 

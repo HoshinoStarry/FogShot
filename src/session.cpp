@@ -21,6 +21,13 @@ constexpr int64_t kConnectTimeoutNs = 30'000'000'000LL;
 constexpr int64_t kApprovalTimeoutNs = 120'000'000'000LL;
 constexpr int64_t kDisconnectTimeoutNs = 6'000'000'000LL;
 constexpr int64_t kHostTimeoutNs = 12'000'000'000LL;
+constexpr int64_t kLanHeadStartNs = 400'000'000LL;
+constexpr int64_t kPathFallbackNs = 1'000'000'000LL;
+constexpr int64_t kPathSwitchCooldownNs = 1'000'000'000LL;
+constexpr int64_t kRttSwitchCooldownNs = 10'000'000'000LL;
+constexpr uint8_t kVpnPathPreference = 1;
+constexpr uint8_t kPublicPathPreference = 2;
+constexpr uint8_t kLanPathPreference = 3;
 
 const char* StateName(Session::State state) {
     switch (state) {
@@ -39,7 +46,67 @@ bool SamePeer(const rc::NetAddress& a, const rc::NetAddress& b) {
     return a.ip == b.ip;
 }
 
-int PathRank(const rc::NetAddress& address) {
+bool IsLoopbackIpv6(const rc::NetAddress& address) {
+    if (!address.v6) return false;
+    for (int i = 0; i < 15; ++i) {
+        if (address.ip6[i] != 0) return false;
+    }
+    return address.ip6[15] == 1;
+}
+
+bool SamePrivateSubnet(uint32_t address, const std::vector<rc::NetInterface>& interfaces) {
+    for (const auto& interface : interfaces) {
+        if (interface.isVirtual || interface.netmask == 0 || !rc::IsPrivateLan(interface.ip)) continue;
+        if ((address & interface.netmask) == (interface.ip & interface.netmask)) return true;
+    }
+    return false;
+}
+
+bool IsPublicIpv4(uint32_t ip) {
+    const uint8_t a = uint8_t(ip >> 24);
+    const uint8_t b = uint8_t(ip >> 16);
+    const uint8_t c = uint8_t(ip >> 8);
+    if (a == 0 || a == 10 || a == 127 || a >= 224) return false;
+    if (a == 100 && b >= 64 && b <= 127) return false;  // CGNAT and common VPN overlays
+    if (a == 169 && b == 254) return false;
+    if (a == 172 && b >= 16 && b <= 31) return false;
+    if (a == 192 && b == 168) return false;
+    if (a == 192 && b == 0 && (c == 0 || c == 2)) return false;
+    if (a == 192 && b == 88 && c == 99) return false;
+    if (a == 198 && (b == 18 || b == 19)) return false;
+    if (a == 198 && b == 51 && c == 100) return false;
+    if (a == 203 && b == 0 && c == 113) return false;
+    return true;
+}
+
+bool IsPublicIpv6(const rc::NetAddress& address) {
+    if (!address.IsGlobalV6()) return false;
+    const uint8_t* b = address.ip6;
+    if (b[0] == 0x20 && b[1] == 0x02) return false;                              // 6to4 tunnel
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00) return false;  // Teredo
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x02) return false;  // benchmark
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;  // documentation
+    return true;
+}
+
+std::optional<uint8_t> RemotePathPreference(const rc::NetAddress& address,
+                                            const std::vector<rc::NetInterface>& interfaces) {
+    if ((!address.v6 && (address.ip >> 24) == 127) || IsLoopbackIpv6(address)) {
+        return kLanPathPreference;
+    }
+    if (address.v6) return IsPublicIpv6(address) ? std::optional<uint8_t>(kPublicPathPreference) : std::nullopt;
+    if (rc::IsPrivateLan(address.ip)) {
+        if (SamePrivateSubnet(address.ip, interfaces)) return kLanPathPreference;
+        return rc::RoutesThroughTunnel(address.ip) ? std::optional<uint8_t>(kVpnPathPreference) : std::nullopt;
+    }
+    if (rc::IsCgnat(address.ip)) return kVpnPathPreference;
+    if (IsPublicIpv4(address.ip)) return kPublicPathPreference;
+    return rc::RoutesThroughTunnel(address.ip) ? std::optional<uint8_t>(kVpnPathPreference) : std::nullopt;
+}
+
+// LAN discovery still hides stale duplicate announcements behind the best address it has seen.
+// Remote account connections use RemotePathPreference and authenticated Welcome results instead.
+int DiscoveryPathRank(const rc::NetAddress& address) {
     if (!address.v6 && rc::RoutesThroughTunnel(address.ip)) return 1;
     if (!address.v6 && rc::IsPrivateLan(address.ip)) return 3;
     if (!address.v6 && rc::IsCgnat(address.ip)) return 1;
@@ -53,7 +120,7 @@ std::string RouteName(const rc::NetAddress& address) {
         return "wan4";
     }
     const bool ula = (address.ip6[0] & 0xfe) == 0xfc;
-    return address.IsLinkLocalV6() || ula ? "lan6" : "wan6";
+    return address.IsLinkLocalV6() || ula || IsLoopbackIpv6(address) ? "lan6" : "wan6";
 }
 
 void SendWithPortGuesses(rc::UdpSocket& socket, const rc::NetAddress& address, const void* data, size_t size,
@@ -419,6 +486,15 @@ bool Session::connect_remote(const nlohmann::json& offer) {
 
     const int64_t now = rc::NowNs();
     m_session_start_ns = now;
+    refresh_remote_candidates();
+    const bool has_lan_candidate = std::any_of(
+        m_path_candidates.begin(), m_path_candidates.end(),
+        [](const RemotePathCandidate& candidate) { return candidate.preference == kLanPathPreference; });
+    const bool has_public_candidate = std::any_of(
+        m_path_candidates.begin(), m_path_candidates.end(),
+        [](const RemotePathCandidate& candidate) { return candidate.preference == kPublicPathPreference; });
+    m_public_race_start_ns = now + (has_lan_candidate ? kLanHeadStartNs : 0);
+    m_vpn_race_start_ns = m_public_race_start_ns + (has_public_candidate ? kLanHeadStartNs : 0);
     m_deadline_ns = now + kConnectTimeoutNs;
     m_last_hello_ns = 0;
     m_last_feedback_ns = now;
@@ -446,6 +522,9 @@ void Session::clear_remote_secrets() {
     m_connect_secret.clear();
     m_relay_token.clear();
     m_register_bytes.clear();
+    m_path_candidates.clear();
+    m_public_race_start_ns = 0;
+    m_vpn_race_start_ns = 0;
     m_last_path_switch_ns = 0;
 }
 
@@ -460,13 +539,90 @@ void Session::send_remote_register(int64_t now_ns) {
 void Session::send_remote_hellos(int64_t now_ns) {
     if (!m_remote || m_hello_bytes.empty()) return;
     const bool guess_ports = now_ns - m_session_start_ns < 10'000'000'000LL;
-    for (const auto& address : m_pc_addresses) {
-        SendWithPortGuesses(m_socket, address, m_hello_bytes.data(), m_hello_bytes.size(), false);
-    }
-    for (const auto& address : m_peers) {
-        SendWithPortGuesses(m_socket, address, m_hello_bytes.data(), m_hello_bytes.size(), guess_ports);
+    for (auto& candidate : m_path_candidates) {
+        const bool eligible = candidate.preference == kLanPathPreference ||
+                              (candidate.preference == kPublicPathPreference && now_ns >= m_public_race_start_ns) ||
+                              (candidate.preference == kVpnPathPreference && now_ns >= m_vpn_race_start_ns);
+        if (!eligible) continue;
+        SendWithPortGuesses(m_socket, candidate.endpoint, m_hello_bytes.data(), m_hello_bytes.size(),
+                            candidate.guess_ports && guess_ports);
+        candidate.last_hello_ns = now_ns;
     }
     m_last_hello_ns = now_ns;
+}
+
+void Session::refresh_remote_candidates() {
+    if (!m_remote) return;
+    const auto interfaces = rc::ListInterfaces();
+    const auto add = [this, &interfaces](const rc::NetAddress& endpoint, bool guess_ports) {
+        const auto preference = RemotePathPreference(endpoint, interfaces);
+        if (!preference) return;
+        auto existing = std::find_if(m_path_candidates.begin(), m_path_candidates.end(),
+                                     [&](const RemotePathCandidate& candidate) {
+                                         return candidate.endpoint == endpoint;
+                                     });
+        if (existing != m_path_candidates.end()) {
+            existing->guess_ports = existing->guess_ports || guess_ports;
+            return;
+        }
+        RemotePathCandidate candidate;
+        candidate.endpoint = endpoint;
+        candidate.preference = *preference;
+        candidate.guess_ports = guess_ports;
+        m_path_candidates.push_back(candidate);
+    };
+    for (const auto& endpoint : m_pc_addresses) add(endpoint, false);
+    for (const auto& endpoint : m_peers) add(endpoint, true);
+}
+
+void Session::record_path_response(const rc::NetAddress& from, int64_t now_ns) {
+    auto candidate = std::find_if(m_path_candidates.begin(), m_path_candidates.end(),
+                                  [&](const RemotePathCandidate& value) { return value.endpoint == from; });
+    if (candidate == m_path_candidates.end() || candidate->last_hello_ns == 0) return;
+    const int64_t elapsed = now_ns - candidate->last_hello_ns;
+    if (elapsed < 0 || elapsed > 5'000'000'000LL) return;
+    const double sample = rc::NsToMs(elapsed);
+    candidate->response_ms = candidate->response_samples == 0 ? sample
+                                                               : candidate->response_ms * 0.75 + sample * 0.25;
+    candidate->response_samples = std::min<uint32_t>(candidate->response_samples + 1, 1024);
+}
+
+bool Session::should_switch_remote_path(const rc::NetAddress& from, int64_t now_ns) const {
+    if (!m_remote || !m_connection || from == m_connection->Remote()) return false;
+    if (m_last_path_switch_ns && now_ns - m_last_path_switch_ns < kPathSwitchCooldownNs) return false;
+    const auto selected = m_connection->Remote();
+    std::vector<rc::NetInterface> interfaces;
+    bool have_interfaces = false;
+    const auto resolve = [&](const rc::NetAddress& endpoint) -> std::optional<uint8_t> {
+        const auto candidate = std::find_if(m_path_candidates.begin(), m_path_candidates.end(),
+                                            [&](const RemotePathCandidate& value) {
+                                                return value.endpoint == endpoint;
+                                            });
+        if (candidate != m_path_candidates.end()) return candidate->preference;
+        if (!have_interfaces) {
+            interfaces = rc::ListInterfaces();
+            have_interfaces = true;
+        }
+        return RemotePathPreference(endpoint, interfaces);
+    };
+
+    const auto next = resolve(from);
+    if (!next) return false;
+
+    const bool current_unresponsive = now_ns - m_connection->LastReceiveNs() > kPathFallbackNs;
+    if (current_unresponsive) return true;
+
+    const auto current = resolve(selected);
+    if (!current || *next > *current) return true;
+    if (*next != *current) return false;
+
+    const auto candidate = std::find_if(m_path_candidates.begin(), m_path_candidates.end(),
+                                        [&](const RemotePathCandidate& value) { return value.endpoint == from; });
+    const double current_rtt = m_connection->Stats().rttMs;
+    if (m_last_path_switch_ns && now_ns - m_last_path_switch_ns < kRttSwitchCooldownNs) return false;
+    if (candidate == m_path_candidates.end() || candidate->response_samples < 3 || current_rtt <= 0) return false;
+    const double margin = std::max(10.0, current_rtt * 0.25);
+    return candidate->response_ms + margin < current_rtt;
 }
 
 void Session::handle_rendezvous(const uint8_t* data, size_t size, const rc::NetAddress& from) {
@@ -495,22 +651,38 @@ void Session::handle_rendezvous(const uint8_t* data, size_t size, const rc::NetA
         for (const auto& peer : message["peers"]) add_endpoint(peer);
     }
     m_remote_registered = true;
-    if (added) send_remote_hellos(rc::NowNs());
+    if (added) {
+        refresh_remote_candidates();
+        send_remote_hellos(rc::NowNs());
+    }
 }
 
 void Session::probe_remote_paths(int64_t now_ns) {
     if (!m_remote || !m_connection) return;
-    const int64_t interval = now_ns - m_session_start_ns < 10'000'000'000LL ? 500'000'000LL : 5'000'000'000LL;
+    const bool current_unresponsive = now_ns - m_connection->LastReceiveNs() > kPathFallbackNs;
+    const int64_t interval = current_unresponsive ? 200'000'000LL
+                                                   : now_ns - m_session_start_ns < 10'000'000'000LL
+                                                         ? 500'000'000LL
+                                                         : 5'000'000'000LL;
     if (m_last_path_probe_ns && now_ns - m_last_path_probe_ns < interval) return;
     m_last_path_probe_ns = now_ns;
 
-    const int current = PathRank(m_connection->Remote());
-    if (current >= 3) return;
-    for (const auto& address : m_pc_addresses) {
-        if (PathRank(address) > current) m_socket.SendTo(address, m_hello_bytes.data(), m_hello_bytes.size());
-    }
-    for (const auto& address : m_peers) {
-        if (PathRank(address) > current) m_socket.SendTo(address, m_hello_bytes.data(), m_hello_bytes.size());
+    const rc::NetAddress selected = m_connection->Remote();
+    const auto selected_candidate = std::find_if(m_path_candidates.begin(), m_path_candidates.end(),
+                                                 [&](const RemotePathCandidate& candidate) {
+                                                     return candidate.endpoint == selected;
+                                                 });
+    const auto current = selected_candidate != m_path_candidates.end()
+                             ? std::optional<uint8_t>(selected_candidate->preference)
+                             : RemotePathPreference(selected, rc::ListInterfaces());
+    const bool guess_ports = current_unresponsive || now_ns - m_session_start_ns < 10'000'000'000LL;
+    for (auto& candidate : m_path_candidates) {
+        if (candidate.endpoint == selected) continue;
+        const bool try_path = current_unresponsive || !current || candidate.preference >= *current;
+        if (!try_path) continue;
+        SendWithPortGuesses(m_socket, candidate.endpoint, m_hello_bytes.data(), m_hello_bytes.size(),
+                            candidate.guess_ports && guess_ports);
+        candidate.last_hello_ns = now_ns;
     }
 }
 
@@ -622,8 +794,8 @@ void Session::pump_discovery(int64_t now_ns) {
                                      [&](const Host& value) { return value.id == host.id; });
         if (existing == m_hosts.end()) m_hosts.push_back(std::move(host));
         else {
-            const int old_rank = PathRank(existing->endpoint);
-            const int new_rank = PathRank(host.endpoint);
+            const int old_rank = DiscoveryPathRank(existing->endpoint);
+            const int new_rank = DiscoveryPathRank(host.endpoint);
             const bool same_address = existing->endpoint == host.endpoint;
             const bool current_stale = host.last_seen_ns - existing->address_seen_ns > 12'000'000'000LL;
             const bool replace = new_rank > old_rank || (same_address) ||
@@ -648,7 +820,9 @@ void Session::pump_discovery(int64_t now_ns) {
                                  [&](const Host& host) { return now_ns - host.last_seen_ns > kHostTimeoutNs; }),
                   m_hosts.end());
     std::sort(m_hosts.begin(), m_hosts.end(), [](const Host& a, const Host& b) {
-        if (PathRank(a.endpoint) != PathRank(b.endpoint)) return PathRank(a.endpoint) > PathRank(b.endpoint);
+        if (DiscoveryPathRank(a.endpoint) != DiscoveryPathRank(b.endpoint)) {
+            return DiscoveryPathRank(a.endpoint) > DiscoveryPathRank(b.endpoint);
+        }
         if (a.name != b.name) return a.name < b.name;
         return a.id < b.id;
     });
@@ -691,11 +865,22 @@ void Session::pump_handshake(int64_t now_ns) {
 
 void Session::handle_handshake(const uint8_t* data, size_t size, const rc::NetAddress& from, int64_t now_ns) {
     if (!m_remote && (!m_target || !SamePeer(from, *m_target))) return;
+    if (m_remote) {
+        const bool known = std::any_of(m_path_candidates.begin(), m_path_candidates.end(),
+                                       [&](const RemotePathCandidate& candidate) {
+                                           return candidate.endpoint == from;
+                                       });
+        if (!known && !RemotePathPreference(from, rc::ListInterfaces())) return;
+    }
 
     rc::HandshakePacket reply;
     if (!rc::ParseHandshake(data, size, reply)) return;
 
     if (reply.type == rc::PacketType::Reject) {
+        if (m_remote && std::none_of(m_path_candidates.begin(), m_path_candidates.end(),
+                                      [&](const RemotePathCandidate& candidate) {
+                                          return candidate.last_hello_ns && SamePeer(candidate.endpoint, from);
+                                      })) return;
         const auto message = ParsedObject(reply.json);
         const std::string reason = message.value("reason", "");
         const std::string text = message.value("message", "The host refused the connection");
@@ -721,6 +906,7 @@ void Session::handle_handshake(const uint8_t* data, size_t size, const rc::NetAd
             return;
         }
     }
+    record_path_response(from, now_ns);
 
     const auto keys = rc::crypto::DeriveSessionKeys(
         m_keys.secretKey, reply.publicKey, m_keys.publicKey, reply.publicKey,
@@ -775,17 +961,21 @@ void Session::pump_session(int64_t now_ns) {
             continue;
         }
         if (rc::IsHandshakeDatagram(buffer, size_t(size))) {
-            if (m_remote && (!m_last_path_switch_ns || now_ns - m_last_path_switch_ns >= 5'000'000'000LL)) {
+            if (m_remote) {
                 rc::HandshakePacket late;
                 if (rc::ParseHandshake(buffer, size_t(size), late) && late.type == rc::PacketType::Welcome &&
-                    late.sessionId == m_connection->SessionId() && PathRank(from) > PathRank(m_connection->Remote())) {
+                    late.sessionId == m_connection->SessionId()) {
                     const auto welcome = ParsedObject(late.json);
                     const std::string expected = rc::WelcomeProof(m_connect_secret, late.publicKey, m_keys.publicKey);
                     if (welcome.contains("proof") && welcome["proof"].is_string() &&
                         welcome["proof"].get<std::string>() == expected) {
-                        RC_LOGI("Switching to the better remote path %s", from.ToString().c_str());
-                        m_connection->SetRemote(from);
-                        m_last_path_switch_ns = now_ns;
+                        record_path_response(from, now_ns);
+                        if (should_switch_remote_path(from, now_ns)) {
+                            RC_LOGI("Switching remote path %s -> %s", m_connection->Remote().ToString().c_str(),
+                                    from.ToString().c_str());
+                            m_connection->SetRemote(from);
+                            m_last_path_switch_ns = now_ns;
+                        }
                     }
                 }
             }
@@ -1258,7 +1448,9 @@ Health Session::health() const {
         value.clock_offset_ns = m_connection->ClockOffsetNs();
         value.clock_synchronized = m_connection->HasClockOffset();
         value.control_queue_chunks = m_connection->SendQueueChunks();
-        value.route = RouteName(m_connection->Remote());
+        const rc::NetAddress remote = m_connection->Remote();
+        value.route = RouteName(remote);
+        value.remote_endpoint = remote.ToString();
     }
     value.fragments_received = m_fragments_received;
     value.fragments_recovered = m_fragments_recovered;

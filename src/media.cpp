@@ -58,9 +58,9 @@ struct Media::Impl {
                         std::size_t(frame_count - written) * kPlaybackChannels * sizeof(int16_t));
         }
 
-        const float volume = self->muted.load(std::memory_order_relaxed)
-                                 ? 0.0f
-                                 : self->volume.load(std::memory_order_relaxed);
+        const bool silent = !self->playbackActive.load(std::memory_order_relaxed) ||
+                            self->muted.load(std::memory_order_relaxed);
+        const float volume = silent ? 0.0f : self->volume.load(std::memory_order_relaxed);
         const std::size_t samples = std::size_t(frame_count) * kPlaybackChannels;
         if (volume < 1.0f) {
             for (std::size_t i = 0; i < samples; ++i) out[i] = int16_t(float(out[i]) * volume);
@@ -177,12 +177,16 @@ struct Media::Impl {
 
     bool ResetAudio() {
         if (!audioDeviceInitialized) return false;
-        ma_device_stop(&audioDevice);
+        audioReady = false;
+        if (ma_device_stop(&audioDevice) != MA_SUCCESS) return false;
         CloseAudioRing();
-        const bool ringReady = OpenAudioRing();
-        const bool decoderReady = opus.Init(int(kSampleRate), int(kPlaybackChannels));
-        const bool started = ringReady && ma_device_start(&audioDevice) == MA_SUCCESS;
-        audioReady = decoderReady && started;
+        if (!OpenAudioRing()) return false;
+        if (!opus.Init(int(kSampleRate), int(kPlaybackChannels))) {
+            CloseAudioRing();
+            return false;
+        }
+        if (ma_device_start(&audioDevice) != MA_SUCCESS) return false;
+        audioReady = true;
         return audioReady;
     }
 
@@ -323,6 +327,7 @@ struct Media::Impl {
     bool microphoneRingInitialized = false;
     bool microphoneReady = false;
     std::atomic<bool> muted{false};
+    std::atomic<bool> playbackActive{true};
     std::atomic<float> volume{1.0f};
     std::vector<uint8_t> pixels;
     int width = 0;
@@ -396,6 +401,10 @@ bool Media::DecodeOpus(const uint8_t* packet, std::size_t packet_size) {
 bool Media::AudioAvailable() const noexcept { return m_impl->audioReady; }
 
 void Media::SetMuted(bool muted) noexcept { m_impl->muted.store(muted, std::memory_order_relaxed); }
+
+void Media::SetPlaybackActive(bool active) noexcept {
+    m_impl->playbackActive.store(active, std::memory_order_relaxed);
+}
 
 void Media::SetVolume(float volume) noexcept {
     if (!(volume >= 0.0f)) volume = 0.0f;

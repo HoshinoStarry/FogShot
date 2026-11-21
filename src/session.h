@@ -108,6 +108,8 @@ struct Health {
     rc::ConnectionStats connection;
     // lan4, lan6, vpn4, wan4 或 wan6。
     std::string route;
+    // 已认证会话当前实际选中的远端地址，包含 UDP 端口。
+    std::string remote_endpoint;
     uint64_t fragments_received = 0;
     uint64_t fragments_recovered = 0;
     uint64_t fragments_lost = 0;
@@ -206,6 +208,15 @@ class Session final {
     const std::map<uint8_t, DesktopStreamStats>& stream_stats() const { return m_stream_stats; }
 
    private:
+    struct RemotePathCandidate {
+        rc::NetAddress endpoint;
+        uint8_t preference = 0;
+        bool guess_ports = false;
+        int64_t last_hello_ns = 0;
+        double response_ms = 0;
+        uint32_t response_samples = 0;
+    };
+
     void set_state(State state, std::string status);
     bool open_discovery(std::string& error);
     bool open_stream_socket(std::string& error);
@@ -219,6 +230,9 @@ class Session final {
     void send_remote_register(int64_t now_ns);
     void send_remote_hellos(int64_t now_ns);
     void handle_rendezvous(const uint8_t* data, size_t size, const rc::NetAddress& from);
+    void refresh_remote_candidates();
+    void record_path_response(const rc::NetAddress& from, int64_t now_ns);
+    bool should_switch_remote_path(const rc::NetAddress& from, int64_t now_ns) const;
     void probe_remote_paths(int64_t now_ns);
     void clear_remote_secrets();
     void update_stats_window(int64_t now_ns);
@@ -262,8 +276,11 @@ class Session final {
     bool m_remote_registered = false;
     int64_t m_last_register_ns = 0;
     int64_t m_session_start_ns = 0;
+    int64_t m_public_race_start_ns = 0;
+    int64_t m_vpn_race_start_ns = 0;
     int64_t m_last_path_probe_ns = 0;
     int64_t m_last_path_switch_ns = 0;
+    std::vector<RemotePathCandidate> m_path_candidates;
 
     std::unique_ptr<rc::Connection> m_connection;
     int64_t m_last_feedback_ns = 0;

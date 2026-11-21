@@ -52,6 +52,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('opens account content from the compact header', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var requestingRemote = false;
+    late StateSetter update;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) {
+            update = setState;
+            return Lobby(
+              state: const ClientState(discover: false),
+              account: const Text('account-content'),
+              requestingRemote: requestingRemote,
+              onConnect: (_) {},
+              onCancel: () {},
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('RinCast 账户'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('account-content'), findsOneWidget);
+    update(() => requestingRemote = true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    expect(find.text('account-content'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   test('encodes physical keys using the host wire convention', () {
     expect(windowsVirtualKey(PhysicalKeyboardKey.keyA), 0x41);
     expect(windowsVirtualKey(PhysicalKeyboardKey.arrowRight), 0x27);

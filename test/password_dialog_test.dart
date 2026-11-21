@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogshot/account_panel.dart';
 import 'package:material_ui/material_ui.dart';
@@ -5,17 +6,23 @@ import 'package:material_ui/material_ui.dart';
 void main() {
   AccountPanel accountPanel({
     Future<String?> Function(String email, String password)? onPasswordSignIn,
+    bool signedIn = false,
+    bool working = false,
+    String code = '',
+    Uri? verificationUrl,
+    List<AccountTarget> hosts = const [],
+    VoidCallback? onSignIn,
   }) => AccountPanel(
     server: Uri.parse('https://rincast.com'),
-    signedIn: false,
-    working: false,
+    signedIn: signedIn,
+    working: working,
     enabled: true,
-    name: '',
-    code: '',
-    verificationUrl: null,
+    name: signedIn ? 'Test account' : '',
+    code: code,
+    verificationUrl: verificationUrl,
     error: '',
-    hosts: const [],
-    onSignIn: () {},
+    hosts: hosts,
+    onSignIn: onSignIn ?? () {},
     onPasswordSignIn: onPasswordSignIn ?? (_, _) async => null,
     onCancel: () {},
     onSignOut: () {},
@@ -103,5 +110,133 @@ void main() {
 
     expect(find.byType(TextFormField), findsNWidgets(2));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('expands automatically when account work starts', (tester) async {
+    var working = false;
+    late StateSetter update;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              update = setState;
+              return accountPanel(working: working);
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('RinCast 账户'));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('设备码登录'), findsNothing);
+
+    update(() => working = true);
+    await tester.pump();
+    expect(find.text('取消'), findsOneWidget);
+  });
+
+  testWidgets(
+    'device sign-in opens HTTPS verification once and can be reopened',
+    (tester) async {
+      const channel = MethodChannel('plugins.flutter.io/url_launcher');
+      final opened = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method != 'launch') return null;
+            opened.add((call.arguments as Map)['url'] as String);
+            return true;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+
+      var signedIn = false;
+      var working = false;
+      var code = '';
+      Uri? verificationUrl;
+      var signInCalls = 0;
+      late StateSetter update;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                update = setState;
+                return accountPanel(
+                  signedIn: signedIn,
+                  working: working,
+                  code: code,
+                  verificationUrl: verificationUrl,
+                  onSignIn: () => signInCalls++,
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('设备码登录'));
+      await tester.pump();
+      expect(signInCalls, 1);
+
+      final url = Uri.parse('https://rincast.com/device?user_code=ABCD-EFGH');
+      update(() {
+        working = true;
+        code = 'ABCD-EFGH';
+        verificationUrl = url;
+      });
+      await tester.pump();
+      await tester.pump();
+      expect(opened, [url.toString()]);
+      expect(find.text('重新打开浏览器'), findsOneWidget);
+
+      update(() => working = true);
+      await tester.pump();
+      expect(opened, [url.toString()]);
+
+      await tester.tap(find.text('重新打开浏览器'));
+      await tester.pump();
+      await tester.pump();
+      expect(opened, [url.toString(), url.toString()]);
+    },
+  );
+
+  testWidgets('existing approval does not open until explicitly requested', (
+    tester,
+  ) async {
+    const channel = MethodChannel('plugins.flutter.io/url_launcher');
+    final opened = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method != 'launch') return null;
+          opened.add((call.arguments as Map)['url'] as String);
+          return true;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+
+    final url = Uri.parse('https://rincast.com/device?user_code=RESTORED');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: accountPanel(
+            working: true,
+            code: 'RESTORED',
+            verificationUrl: url,
+          ),
+        ),
+      ),
+    );
+
+    expect(opened, isEmpty);
+    await tester.tap(find.text('打开浏览器'));
+    await tester.pump();
+    await tester.pump();
+    expect(opened, [url.toString()]);
   });
 }
