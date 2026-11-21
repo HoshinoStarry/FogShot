@@ -128,9 +128,9 @@ jobs:
           plist="$app/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$plist")" = "$APP_ID"
           executable="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$plist")"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/$executable"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
           backend="$(find "$app/Contents/Frameworks" -type f -name 'rincast_backend' -print -quit)"
-          lipo -verify_arch arm64 x86_64 "$backend"
+          lipo "$backend" -verify_arch arm64 x86_64
           mkdir -p dist
           ditto -c -k --keepParent "$app" dist/FogShot-macos-universal.zip
 
@@ -141,9 +141,9 @@ jobs:
           app="$(find build/ios/iphoneos -maxdepth 1 -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$APP_ID"
           executable="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")"
-          lipo -verify_arch arm64 "$app/$executable"
+          lipo "$app/$executable" -verify_arch arm64
           backend="$(find "$app/Frameworks" -type f -name 'rincast_backend' -print -quit)"
-          lipo -verify_arch arm64 "$backend"
+          lipo "$backend" -verify_arch arm64
           mkdir -p dist
           ditto -c -k --keepParent "$app" dist/FogShot-ios-arm64-unsigned.zip
 

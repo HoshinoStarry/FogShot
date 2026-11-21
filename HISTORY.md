@@ -13,3 +13,4 @@
 
 - 按用户要求移除 CI 的 iOS 模拟器，只保留未签名的 ARM64 真机包。首轮 Linux x64 和 ARM64 构建通过。首轮 Android Runner 缺少 `sdkmanager`，加入显式的 SDK 和 NDK 安装步骤。
 - 首轮 iOS 编译器将 miniaudio 的 AVAudioSession 头文件作为纯 C++ 处理，导致编译失败。将 iOS 的媒体实现交由 Objective-C++ 编译。
+- 首轮 Windows x64、ARM64 已生成经架构校验的便携包。macOS 通用应用已编译，校验命令因 `lipo` 参数顺序失败，已修正命令。
