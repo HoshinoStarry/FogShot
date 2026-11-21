@@ -56,7 +56,12 @@ abstract interface class AccountTokenStore {
 
 class SecureAccountTokenStore implements AccountTokenStore {
   SecureAccountTokenStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+    : _storage =
+          storage ??
+          const FlutterSecureStorage(
+            // Ad hoc macOS distributions use the login keychain without sharing entitlements.
+            mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+          );
 
   static const _key = 'fogshot.rincast.account.v1';
   final FlutterSecureStorage _storage;
