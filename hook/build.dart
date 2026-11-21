@@ -22,7 +22,7 @@ Future<void> main(List<String> args) async {
     };
     final source = input.packageRoot;
     final install = input.outputDirectory.resolve('install/');
-    final logger = Logger('FogShot native')..level = Level.ALL;
+    final logger = Logger.root..level = Level.ALL;
     final logs = logger.onRecord.listen(
       (record) => stderr.writeln(record.message),
     );
