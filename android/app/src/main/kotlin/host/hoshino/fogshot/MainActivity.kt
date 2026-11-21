@@ -2,6 +2,8 @@ package host.hoshino.fogshot
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -19,6 +21,23 @@ class MainActivity : FlutterActivity() {
                 }
                 requestMicrophone(result)
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, deviceNameChannel)
+            .setMethodCallHandler { call, result ->
+                if (call.method != currentDeviceNameMethod) {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                result.success(currentDeviceName())
+            }
+    }
+
+    private fun currentDeviceName(): String {
+        val configured = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+            Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+        } else {
+            null
+        }
+        return configured?.trim()?.takeIf { it.isNotEmpty() } ?: Build.MODEL
     }
 
     private fun requestMicrophone(result: MethodChannel.Result) {
@@ -50,6 +69,8 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val microphoneChannel = "host.hoshino.fogshot/microphone"
         private const val requestMethod = "request"
+        private const val deviceNameChannel = "host.hoshino.fogshot/device_name"
+        private const val currentDeviceNameMethod = "currentDeviceName"
         private const val microphoneRequestCode = 0x4D49
     }
 }

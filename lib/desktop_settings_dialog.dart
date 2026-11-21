@@ -68,6 +68,7 @@ class _DesktopSettingsDialogState extends State<_DesktopSettingsDialog> {
     autoConnect: _autoConnect,
     lastAddress: widget.initial.lastAddress,
     lastPcId: widget.initial.lastPcId,
+    lastPcAccountId: widget.initial.lastPcAccountId,
   );
 
   @override

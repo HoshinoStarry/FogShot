@@ -129,13 +129,14 @@ class Client implements Finalizable {
 
   static bool get mobile => Platform.isIOS || Platform.isAndroid;
 
-  static Future<Client> open() async {
+  static Future<Client> open({String? deviceName}) async {
     final dir = await getApplicationSupportDirectory();
     await dir.create(recursive: true);
     return using((arena) {
-      final handle = rcd_create(
+      final handle = rcd_create_named(
         dir.path.toNativeUtf8(allocator: arena),
         Platform.operatingSystem.toNativeUtf8(allocator: arena),
+        deviceName?.toNativeUtf8(allocator: arena) ?? nullptr,
         mobile ? 1 : 0,
       );
       if (handle == nullptr) throw StateError('无法初始化 RinCast 客户端');
@@ -260,6 +261,7 @@ class Client implements Finalizable {
   void text(String text) => _command(4, text);
   void settings(DesktopSettings settings) =>
       _command(6, jsonEncode(settings.toJson()));
+  void volume(double volume) => _command(6, jsonEncode({'volume': volume}));
   void microphone(bool enabled) => _command(7, null, enabled);
   void point(double u, double v, {int streamId = 0}) =>
       rcd_input(_handle, 0, streamId, 0, u, v);

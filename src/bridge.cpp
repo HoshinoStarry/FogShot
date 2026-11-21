@@ -89,9 +89,9 @@ const char* codecName(rc::VideoCodec codec) {
     return "";
 }
 
-rincast::SessionConfig makeConfig(const char* directory, const char* platform, bool mobile) {
+rincast::SessionConfig makeConfig(const char* directory, const char* platform, const char* deviceName, bool mobile) {
     rincast::SessionConfig config;
-    config.device_name = std::string("FogShot (") + platform + ")";
+    config.device_name = deviceName && *deviceName ? deviceName : std::string("FogShot (") + platform + ")";
     config.auto_start_desktop = false;
     config.settings["desktopFps"] = mobile ? 30 : 60;
     config.decoders["maxWidth"] = mobile ? 1920 : 2560;
@@ -350,8 +350,10 @@ void RcdClient::run(rincast::SessionConfig config) {
                     for (const auto* name : {"desktopFps", "desktopBitrateMbps", "adaptiveBitrate", "streamAudio", "codec"}) {
                         if (settings.contains(name)) wire[name] = settings[name];
                     }
-                    wire["tenBit"] = av1TenBit && settings.contains("tenBit") && settings["tenBit"] == true &&
-                                     (!wire.contains("codec") || wire["codec"] != "h264");
+                    if (settings.contains("tenBit")) {
+                        wire["tenBit"] = av1TenBit && settings["tenBit"] == true &&
+                                         (!wire.contains("codec") || wire["codec"] != "h264");
+                    }
                     if (settings.contains("volume") && settings["volume"].is_number()) audio.SetVolume(settings["volume"].get<float>());
                     if (settings.contains("maxDecodeWidth") && settings["maxDecodeWidth"].is_number_integer() &&
                         settings.contains("maxDecodeHeight") && settings["maxDecodeHeight"].is_number_integer()) {
@@ -360,7 +362,7 @@ void RcdClient::run(rincast::SessionConfig config) {
                         session.set_decode_limits(width <= 0 ? defaultWidth : uint32_t(std::clamp(width, 640, 4096)),
                                                   height <= 0 ? defaultHeight : uint32_t(std::clamp(height, 480, 4096)));
                     }
-                    session.update_settings(wire);
+                    if (!wire.empty()) session.update_settings(wire);
                     break;
                 }
                 case CommandKind::Microphone: setMic(command.down); break;
@@ -408,6 +410,7 @@ void RcdClient::run(rincast::SessionConfig config) {
             const auto health = session.health();
             const auto& link = health.connection;
             network = {{"route", health.route}, {"endpoint", health.remote_endpoint},
+                       {"localIp", health.local_ip}, {"observedLocalIp", health.observed_local_ip},
                        {"activeSeconds", std::chrono::duration_cast<std::chrono::seconds>(now - connectedAt).count()},
                        {"lastPacketMs", health.last_receive_age_ms}, {"clockSynchronized", health.clock_synchronized},
                        {"bytesReceived", link.bytesReceived}, {"bytesSent", link.bytesSent},
@@ -507,8 +510,13 @@ void RcdClient::run(rincast::SessionConfig config) {
     session.disconnect();
 }
 RcdClient* rcd_create(const char* profile_dir, const char* platform, int32_t mobile) {
+    return rcd_create_named(profile_dir, platform, nullptr, mobile);
+}
+
+RcdClient* rcd_create_named(const char* profile_dir, const char* platform,
+                           const char* device_name, int32_t mobile) {
     try {
-        return new RcdClient(makeConfig(profile_dir, platform, mobile != 0));
+        return new RcdClient(makeConfig(profile_dir, platform, device_name, mobile != 0));
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FogShot: %s\n", error.what());
         return nullptr;

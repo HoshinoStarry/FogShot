@@ -5,6 +5,7 @@ import AVFAudio
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var microphoneChannel: FlutterMethodChannel?
+  private var deviceNameChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -27,6 +28,19 @@ import AVFAudio
       self.requestMicrophonePermission(result: result)
     }
     microphoneChannel = channel
+
+    let deviceNameChannel = FlutterMethodChannel(
+      name: "host.hoshino.fogshot/device_name",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    deviceNameChannel.setMethodCallHandler { call, result in
+      guard call.method == "currentDeviceName" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(UIDevice.current.name)
+    }
+    self.deviceNameChannel = deviceNameChannel
   }
 
   private func requestMicrophonePermission(result: @escaping FlutterResult) {

@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'account.dart';
+
 typedef AccountTarget = ({String id, String name, bool online, bool busy});
 
 class AccountPanel extends StatefulWidget {
@@ -18,6 +20,8 @@ class AccountPanel extends StatefulWidget {
     required this.verificationUrl,
     required this.error,
     required this.hosts,
+    this.accounts = const [],
+    this.activeAccountId,
     required this.onSignIn,
     required this.onPasswordSignIn,
     required this.onCancel,
@@ -25,6 +29,9 @@ class AccountPanel extends StatefulWidget {
     required this.onRefresh,
     required this.onConnect,
     required this.onServerChanged,
+    this.onSelectAccount,
+    this.onRemoveAccount,
+    this.onConnectAccount,
   });
 
   final Uri server;
@@ -32,11 +39,16 @@ class AccountPanel extends StatefulWidget {
   final String name, code, error;
   final Uri? verificationUrl;
   final List<AccountTarget> hosts;
+  final List<AccountProfile> accounts;
+  final String? activeAccountId;
   final VoidCallback onSignIn, onCancel, onSignOut, onRefresh;
   final Future<String?> Function(String email, String password)
   onPasswordSignIn;
   final ValueChanged<String> onConnect;
   final Future<String?> Function(String) onServerChanged;
+  final ValueChanged<String>? onSelectAccount;
+  final Future<String?> Function(String accountId)? onRemoveAccount;
+  final void Function(String accountId, String pcId)? onConnectAccount;
 
   @override
   State<AccountPanel> createState() => _AccountPanelState();
@@ -51,6 +63,7 @@ class _AccountPanelState extends State<AccountPanel> {
   void didUpdateWidget(AccountPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if ((widget.signedIn && !oldWidget.signedIn) ||
+        (_hasAccounts && oldWidget.accounts.isEmpty) ||
         (widget.working && !oldWidget.working) ||
         (widget.code.isNotEmpty && oldWidget.code.isEmpty) ||
         (widget.error.isNotEmpty && oldWidget.error.isEmpty)) {
@@ -60,7 +73,9 @@ class _AccountPanelState extends State<AccountPanel> {
       _approvalWasAutoOpened = false;
     }
     if (_autoOpenApprovalPending) {
-      if (widget.signedIn ||
+      final signInEndedWithoutCode =
+          oldWidget.working && !widget.working && widget.code.isEmpty;
+      if (signInEndedWithoutCode ||
           (!widget.working && widget.code.isEmpty && widget.error.isNotEmpty)) {
         _autoOpenApprovalPending = false;
       } else {
@@ -135,8 +150,44 @@ class _AccountPanelState extends State<AccountPanel> {
     );
   }
 
+  Future<void> _removeAccount(AccountProfile account) async {
+    final remove = widget.onRemoveAccount;
+    if (remove == null) return;
+    final label = account.name.isNotEmpty ? account.name : account.email;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('移除 RinCast 账户'),
+        content: Text('将从此设备移除“$label”及其登录令牌。其他账户的设备不受影响。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final error = await remove(account.id);
+    if (!mounted || error == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+  }
+
+  bool get _hasAccounts => widget.accounts.isNotEmpty;
+
   String get _summaryStatus {
     if (widget.code.isNotEmpty) return '等待设备码确认';
+    if (_hasAccounts) {
+      final hosts = widget.accounts.expand((account) => account.hosts);
+      final total = hosts.length;
+      final online = hosts.where((host) => host.online).length;
+      if (widget.working) return '${widget.accounts.length} 个账户 · 正在更新设备';
+      return '${widget.accounts.length} 个账户 · $online/$total 台设备在线';
+    }
     if (widget.working) {
       return widget.signedIn ? '正在更新主机' : '正在登录';
     }
@@ -154,7 +205,11 @@ class _AccountPanelState extends State<AccountPanel> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
-    final active = widget.signedIn || widget.working || widget.code.isNotEmpty;
+    final active =
+        widget.signedIn ||
+        _hasAccounts ||
+        widget.working ||
+        widget.code.isNotEmpty;
     return Card(
       margin: EdgeInsets.zero,
       elevation: 0,
@@ -185,7 +240,7 @@ class _AccountPanelState extends State<AccountPanel> {
                         borderRadius: BorderRadius.circular(11),
                       ),
                       child: Icon(
-                        widget.signedIn
+                        widget.signedIn || _hasAccounts
                             ? Icons.account_circle_rounded
                             : Icons.person_outline_rounded,
                         size: 21,
@@ -200,7 +255,8 @@ class _AccountPanelState extends State<AccountPanel> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            widget.signedIn && widget.name.isNotEmpty
+                            (widget.signedIn || _hasAccounts) &&
+                                    widget.name.isNotEmpty
                                 ? widget.name
                                 : 'RinCast 账户',
                             maxLines: 1,
@@ -275,8 +331,7 @@ class _AccountPanelState extends State<AccountPanel> {
   Widget _expandedContent(BuildContext context) {
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
-    final serverEditable =
-        !widget.working && !widget.signedIn && widget.code.isEmpty;
+    final serverEditable = !widget.working && widget.code.isEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -311,7 +366,7 @@ class _AccountPanelState extends State<AccountPanel> {
         ],
         if (widget.code.isNotEmpty)
           _approvalContent(context)
-        else if (widget.signedIn)
+        else if (widget.signedIn || _hasAccounts)
           _signedInContent(context)
         else if (widget.working)
           _waitingContent(context)
@@ -396,6 +451,7 @@ class _AccountPanelState extends State<AccountPanel> {
   }
 
   Widget _signedInContent(BuildContext context) {
+    if (_hasAccounts) return _accountsContent(context);
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
     return Column(
@@ -440,7 +496,9 @@ class _AccountPanelState extends State<AccountPanel> {
             _accountHostTile(context, widget.hosts[index]),
             if (index != widget.hosts.length - 1) const SizedBox(height: 5),
           ],
-        const SizedBox(height: 7),
+        const SizedBox(height: 10),
+        _addAccountControls(context),
+        const SizedBox(height: 4),
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
@@ -453,13 +511,238 @@ class _AccountPanelState extends State<AccountPanel> {
     );
   }
 
-  Widget _accountHostTile(BuildContext context, AccountTarget host) {
+  Widget _accountsContent(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Text('账户与设备', style: theme.textTheme.titleSmall),
+            const Spacer(),
+            IconButton(
+              tooltip: '刷新全部账户设备',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.working ? null : widget.onRefresh,
+              icon: const Icon(Icons.refresh_rounded, size: 19),
+            ),
+          ],
+        ),
+        if (widget.working)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: LinearProgressIndicator(
+              minHeight: 2,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        for (var index = 0; index < widget.accounts.length; index++) ...[
+          _accountSection(context, widget.accounts[index]),
+          if (index != widget.accounts.length - 1) const SizedBox(height: 8),
+        ],
+        const SizedBox(height: 10),
+        _addAccountControls(context),
+        if (widget.activeAccountId != null) ...[
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: widget.onSignOut,
+              icon: const Icon(Icons.logout_rounded, size: 18),
+              label: const Text('退出当前账户'),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _accountSection(BuildContext context, AccountProfile account) {
+    final theme = Theme.of(context);
+    final palette = theme.colorScheme;
+    final active = account.id == widget.activeAccountId || account.active;
+    final online = account.hosts.where((host) => host.online).length;
+    final status = account.loadingHosts
+        ? '正在更新设备'
+        : account.error != null
+        ? '账户需要处理'
+        : '$online/${account.hosts.length} 台设备在线';
+    final canSelect = widget.onSelectAccount != null && !active;
+    final label = account.name.isNotEmpty ? account.name : account.email;
+    return Material(
+      color: palette.surfaceContainerHighest.withAlpha(80),
+      borderRadius: BorderRadius.circular(11),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: canSelect ? () => widget.onSelectAccount!(account.id) : null,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(9, 7, 5, 7),
+              child: Row(
+                children: [
+                  Icon(
+                    active
+                        ? Icons.check_circle_rounded
+                        : Icons.account_circle_outlined,
+                    size: 20,
+                    color: active ? palette.primary : palette.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            if (active) ...[
+                              const SizedBox(width: 6),
+                              _StatusPill(label: '当前'),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          '${account.server.host} · $status',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: account.error == null
+                                ? palette.onSurfaceVariant
+                                : palette.error,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (account.loadingHosts)
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else if (widget.onRemoveAccount != null)
+                    PopupMenuButton<String>(
+                      tooltip: '管理账户',
+                      enabled: !widget.working,
+                      onSelected: (_) => unawaited(_removeAccount(account)),
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(value: 'remove', child: Text('移除账户')),
+                      ],
+                      icon: const Icon(Icons.more_vert_rounded, size: 19),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (account.error != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(37, 0, 10, 6),
+              child: Text(
+                account.error!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: palette.error,
+                ),
+              ),
+            ),
+          Divider(
+            height: 1,
+            indent: 9,
+            endIndent: 9,
+            color: palette.outlineVariant.withAlpha(80),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 5, 6, 6),
+            child: account.hosts.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 5, 4, 6),
+                    child: Text(
+                      account.loadingHosts ? '正在获取设备…' : '暂无可用设备',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: palette.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : Column(
+                    children: [
+                      for (
+                        var index = 0;
+                        index < account.hosts.length;
+                        index++
+                      ) ...[
+                        _accountHostTile(
+                          context,
+                          (
+                            id: account.hosts[index].id,
+                            name: account.hosts[index].name,
+                            online: account.hosts[index].online,
+                            busy: account.hosts[index].busy,
+                          ),
+                          accountId: account.id,
+                          accountBusy: account.loadingHosts,
+                        ),
+                        if (index != account.hosts.length - 1)
+                          const SizedBox(height: 4),
+                      ],
+                    ],
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _addAccountControls(BuildContext context) => Wrap(
+    spacing: 8,
+    runSpacing: 7,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      Text('添加账户', style: Theme.of(context).textTheme.labelMedium),
+      FilledButton.tonalIcon(
+        onPressed: widget.enabled && !widget.working
+            ? _startDeviceSignIn
+            : null,
+        icon: const Icon(Icons.qr_code_2_rounded, size: 17),
+        label: const Text('设备码'),
+      ),
+      OutlinedButton.icon(
+        onPressed: widget.enabled && !widget.working
+            ? () => _openPasswordSignIn(context)
+            : null,
+        icon: const Icon(Icons.mail_outline_rounded, size: 17),
+        label: const Text('密码'),
+      ),
+    ],
+  );
+
+  Widget _accountHostTile(
+    BuildContext context,
+    AccountTarget host, {
+    String? accountId,
+    bool accountBusy = false,
+  }) {
     final enabled =
-        host.online && !host.busy && widget.enabled && !widget.working;
+        host.online &&
+        !host.busy &&
+        widget.enabled &&
+        !accountBusy &&
+        (accountId != null || !widget.working);
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
     final status = host.busy ? '忙碌' : (host.online ? '在线' : '离线');
     return Material(
+      key: ValueKey('${accountId ?? ''}\u0000${host.id}'),
       color: palette.surfaceContainerHighest.withAlpha(95),
       borderRadius: BorderRadius.circular(11),
       clipBehavior: Clip.antiAlias,
@@ -494,7 +777,16 @@ class _AccountPanelState extends State<AccountPanel> {
                 color: palette.primary,
               )
             : null,
-        onTap: enabled ? () => widget.onConnect(host.id) : null,
+        onTap: enabled
+            ? () {
+                final connectAccount = widget.onConnectAccount;
+                if (accountId != null && connectAccount != null) {
+                  connectAccount(accountId, host.id);
+                } else {
+                  widget.onConnect(host.id);
+                }
+              }
+            : null,
       ),
     );
   }
@@ -525,6 +817,29 @@ class _AccountPanelState extends State<AccountPanel> {
           label: const Text('邮箱密码登录'),
         ),
       ],
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: palette.primaryContainer,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall
+            ?.copyWith(color: palette.onPrimaryContainer),
+      ),
     );
   }
 }

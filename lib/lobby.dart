@@ -4,6 +4,15 @@ import 'package:material_ui/material_ui.dart';
 
 import 'client.dart';
 
+typedef LobbyAccountDevice = ({
+  String accountId,
+  String account,
+  String id,
+  String name,
+  bool online,
+  bool busy,
+});
+
 class Lobby extends StatefulWidget {
   const Lobby({
     super.key,
@@ -12,7 +21,10 @@ class Lobby extends StatefulWidget {
     required this.onCancel,
     this.initialAddress = '',
     this.account,
+    this.remoteDevices = const [],
+    this.onConnectAccount,
     this.requestingRemote = false,
+    this.remoteError,
     this.onSettings,
   });
 
@@ -21,7 +33,10 @@ class Lobby extends StatefulWidget {
   final VoidCallback onCancel;
   final String initialAddress;
   final Widget? account;
+  final List<LobbyAccountDevice> remoteDevices;
+  final ValueChanged<LobbyAccountDevice>? onConnectAccount;
   final bool requestingRemote;
+  final String? remoteError;
   final VoidCallback? onSettings;
 
   @override
@@ -219,15 +234,18 @@ class _LobbyState extends State<Lobby> {
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
     final state = widget.state;
-    final failed = !widget.requestingRemote && state.phase == Phase.failed;
+    final failed =
+        !widget.requestingRemote &&
+        (state.phase == Phase.failed || widget.remoteError != null);
     final status = widget.requestingRemote
         ? '正在获取账号主机'
-        : switch (state.phase) {
-            Phase.approval => '等待主机允许配对',
-            Phase.connecting => '正在连接主机',
-            Phase.failed => state.status,
-            _ => null,
-          };
+        : widget.remoteError ??
+              switch (state.phase) {
+                Phase.approval => '等待主机允许配对',
+                Phase.connecting => '正在连接主机',
+                Phase.failed => state.status,
+                _ => null,
+              };
     final statusColor = failed
         ? palette.errorContainer
         : palette.primaryContainer.withAlpha(150);
@@ -519,70 +537,140 @@ class _LobbyState extends State<Lobby> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _remoteDevicesCard(BuildContext context) {
     final theme = Theme.of(context);
     final palette = theme.colorScheme;
-    return Scaffold(
-      body: DecoratedBox(
-        decoration: BoxDecoration(
-          color: palette.surface,
-          gradient: RadialGradient(
-            center: const Alignment(-0.9, -1),
-            radius: 1.15,
-            colors: [palette.primary.withAlpha(19), palette.surface],
-            stops: const [0, 0.62],
-          ),
-        ),
-        child: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxWidth < 720;
-              final split = constraints.maxWidth >= 860;
-              final connect = _connectCard(context, compact: compact);
-              final hosts = _hostsCard(context);
-              return Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1080),
-                  child: ListView(
-                    padding: EdgeInsets.fromLTRB(
-                      compact ? 16 : 28,
-                      compact ? 18 : 34,
-                      compact ? 16 : 28,
-                      28,
-                    ),
-                    children: [
-                      _header(context, compact: compact),
-                      SizedBox(height: compact ? 24 : 34),
-                      if (!widget.state.discover || split)
-                        split
-                            ? Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(flex: 5, child: connect),
-                                  const SizedBox(width: 20),
-                                  Expanded(flex: 4, child: hosts),
-                                ],
-                              )
-                            : Center(
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 680,
-                                  ),
-                                  child: connect,
-                                ),
-                              )
-                      else ...[
-                        connect,
-                        const SizedBox(height: 14),
-                        hosts,
-                      ],
-                    ],
-                  ),
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      color: palette.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: palette.outlineVariant.withAlpha(110)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('远程主机', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 6),
+            for (final device in widget.remoteDevices)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  Icons.computer_outlined,
+                  color: device.online
+                      ? palette.primary
+                      : palette.onSurfaceVariant,
                 ),
-              );
-            },
-          ),
+                title: Text(
+                  device.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  [
+                    device.account,
+                    if (!device.online) '离线' else if (device.busy) '忙碌',
+                  ].join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: device.online && !device.busy
+                    ? const Icon(Icons.chevron_right_rounded)
+                    : null,
+                onTap:
+                    _pending ||
+                        !device.online ||
+                        device.busy ||
+                        widget.onConnectAccount == null
+                    ? null
+                    : () => widget.onConnectAccount!(device),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 720;
+            final discover = widget.state.discover;
+            final split = discover && constraints.maxWidth >= 860;
+            final connect = _connectCard(context, compact: compact);
+            final remote = widget.remoteDevices.isEmpty
+                ? null
+                : _remoteDevicesCard(context);
+            return Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1080),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 16 : 28,
+                    compact ? 18 : 34,
+                    compact ? 16 : 28,
+                    28,
+                  ),
+                  children: [
+                    _header(context, compact: compact),
+                    SizedBox(height: compact ? 24 : 34),
+                    if (split)
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            flex: 5,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                connect,
+                                if (remote != null) ...[
+                                  const SizedBox(height: 14),
+                                  remote,
+                                ],
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 20),
+                          Expanded(flex: 4, child: _hostsCard(context)),
+                        ],
+                      )
+                    else if (discover) ...[
+                      connect,
+                      const SizedBox(height: 14),
+                      _hostsCard(context),
+                      if (remote != null) ...[
+                        const SizedBox(height: 14),
+                        remote,
+                      ],
+                    ] else
+                      Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 680),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              connect,
+                              if (remote != null) ...[
+                                const SizedBox(height: 14),
+                                remote,
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
         ),
       ),
     );

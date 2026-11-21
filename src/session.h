@@ -110,6 +110,8 @@ struct Health {
     std::string route;
     // 已认证会话当前实际选中的远端地址，包含 UDP 端口。
     std::string remote_endpoint;
+    std::string local_ip;
+    std::string observed_local_ip;
     uint64_t fragments_received = 0;
     uint64_t fragments_recovered = 0;
     uint64_t fragments_lost = 0;
@@ -281,6 +283,11 @@ class Session final {
     int64_t m_last_path_probe_ns = 0;
     int64_t m_last_path_switch_ns = 0;
     std::vector<RemotePathCandidate> m_path_candidates;
+    std::optional<rc::NetAddress> m_observed_local_v4;
+    std::optional<rc::NetAddress> m_observed_local_v6;
+    mutable std::optional<rc::NetAddress> m_diagnostic_peer;
+    mutable std::string m_diagnostic_route;
+    mutable std::string m_diagnostic_local_ip;
 
     std::unique_ptr<rc::Connection> m_connection;
     int64_t m_last_feedback_ns = 0;

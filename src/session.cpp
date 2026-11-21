@@ -1,3 +1,15 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "session.h"
 
 #include <algorithm>
@@ -121,6 +133,53 @@ std::string RouteName(const rc::NetAddress& address) {
     }
     const bool ula = (address.ip6[0] & 0xfe) == 0xfc;
     return address.IsLinkLocalV6() || ula || IsLoopbackIpv6(address) ? "lan6" : "wan6";
+}
+
+// A connected UDP probe selects a local interface without sending a datagram.
+std::string LocalRouteIp(const rc::NetAddress& remote) {
+    sockaddr_storage peer{};
+    int peer_size;
+    if (remote.v6) {
+        auto& addr = reinterpret_cast<sockaddr_in6&>(peer);
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(remote.port);
+        addr.sin6_scope_id = remote.scope;
+        std::memcpy(&addr.sin6_addr, remote.ip6, sizeof(remote.ip6));
+        peer_size = sizeof(addr);
+    } else {
+        auto& addr = reinterpret_cast<sockaddr_in&>(peer);
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(remote.port);
+        addr.sin_addr.s_addr = htonl(remote.ip);
+        peer_size = sizeof(addr);
+    }
+    const auto probe = socket(remote.v6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_storage bound{};
+#ifdef _WIN32
+    if (probe == INVALID_SOCKET) return {};
+    int size = sizeof(bound);
+#else
+    if (probe < 0) return {};
+    socklen_t size = sizeof(bound);
+#endif
+    const bool found = ::connect(probe, reinterpret_cast<const sockaddr*>(&peer), peer_size) == 0 &&
+                       getsockname(probe, reinterpret_cast<sockaddr*>(&bound), &size) == 0;
+#ifdef _WIN32
+    closesocket(probe);
+#else
+    close(probe);
+#endif
+    if (!found) return {};
+    rc::NetAddress local;
+    local.v6 = remote.v6;
+    if (local.v6) {
+        const auto& addr = reinterpret_cast<const sockaddr_in6&>(bound);
+        std::memcpy(local.ip6, &addr.sin6_addr, sizeof(local.ip6));
+        local.scope = addr.sin6_scope_id;
+    } else {
+        local.ip = ntohl(reinterpret_cast<const sockaddr_in&>(bound).sin_addr.s_addr);
+    }
+    return local.IpString();
 }
 
 void SendWithPortGuesses(rc::UdpSocket& socket, const rc::NetAddress& address, const void* data, size_t size,
@@ -523,6 +582,9 @@ void Session::clear_remote_secrets() {
     m_relay_token.clear();
     m_register_bytes.clear();
     m_path_candidates.clear();
+    m_observed_local_v4.reset();
+    m_observed_local_v6.reset();
+    m_diagnostic_peer.reset();
     m_public_race_start_ns = 0;
     m_vpn_race_start_ns = 0;
     m_last_path_switch_ns = 0;
@@ -630,8 +692,16 @@ void Session::handle_rendezvous(const uint8_t* data, size_t size, const rc::NetA
     nlohmann::json message = nlohmann::json::parse(reinterpret_cast<const char*>(data) + 4,
                                                    reinterpret_cast<const char*>(data) + size, nullptr, false);
     if (!message.is_object() || !message.contains("op") || !message["op"].is_string() ||
-        message["op"] != "registered" || (message.contains("session") && message["session"] != m_remote_session)) {
+        message["op"] != "registered" || (message.contains("session") && message["session"] != m_remote_session) ||
+        (message.contains("role") && message["role"] != 1)) {
         return;
+    }
+
+    if (const auto self = message.find("self"); self != message.end() && self->is_string()) {
+        rc::NetAddress endpoint;
+        if (rc::NetAddress::ParseEndpoint(self->get<std::string>(), endpoint) && endpoint.valid()) {
+            (endpoint.v6 ? m_observed_local_v6 : m_observed_local_v4) = endpoint;
+        }
     }
 
     bool added = false;
@@ -1449,8 +1519,16 @@ Health Session::health() const {
         value.clock_synchronized = m_connection->HasClockOffset();
         value.control_queue_chunks = m_connection->SendQueueChunks();
         const rc::NetAddress remote = m_connection->Remote();
-        value.route = RouteName(remote);
         value.remote_endpoint = remote.ToString();
+        if (m_diagnostic_peer != remote) {
+            m_diagnostic_peer = remote;
+            m_diagnostic_route = RouteName(remote);
+            m_diagnostic_local_ip = LocalRouteIp(remote);
+        }
+        value.route = m_diagnostic_route;
+        value.local_ip = m_diagnostic_local_ip;
+        const auto& observed = remote.v6 ? m_observed_local_v6 : m_observed_local_v4;
+        if (observed) value.observed_local_ip = observed->IpString();
     }
     value.fragments_received = m_fragments_received;
     value.fragments_recovered = m_fragments_recovered;

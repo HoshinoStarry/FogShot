@@ -1,9 +1,15 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
+
+import 'ip_location.dart';
 
 class StreamNetwork {
   const StreamNetwork({
     this.route = '',
     this.endpoint = '',
+    this.localIp = '',
+    this.observedLocalIp = '',
     this.rttMs,
     this.jitterMs,
     this.mbps,
@@ -29,6 +35,8 @@ class StreamNetwork {
   factory StreamNetwork.fromJson(Map<String, dynamic> data) => StreamNetwork(
     route: data['route'] as String? ?? '',
     endpoint: data['endpoint'] as String? ?? '',
+    localIp: data['localIp'] as String? ?? '',
+    observedLocalIp: data['observedLocalIp'] as String? ?? '',
     rttMs: (data['rttMs'] as num?)?.toDouble(),
     jitterMs: (data['jitterMs'] as num?)?.toDouble(),
     mbps: (data['mbps'] as num?)?.toDouble(),
@@ -54,7 +62,7 @@ class StreamNetwork {
     ],
   );
 
-  final String route, endpoint;
+  final String route, endpoint, localIp, observedLocalIp;
   final double? rttMs, jitterMs, mbps, uploadMbps, targetMbps, lossPercent;
   final int? activeSeconds, lastPacketMs, bytesReceived, bytesSent;
   final int? packetsReceived, packetsSent, packetsRejected, controlRetransmits;
@@ -106,15 +114,118 @@ class StreamVideoMetrics {
   final double? captureToDecodeMs;
 }
 
-class StreamNetworkPanel extends StatelessWidget {
+class StreamNetworkPanel extends StatefulWidget {
   const StreamNetworkPanel({
     super.key,
     required this.metrics,
     required this.onClose,
+    this.ipLocationService,
   });
 
   final StreamNetwork metrics;
   final VoidCallback onClose;
+  final IpLocationService? ipLocationService;
+
+  @override
+  State<StreamNetworkPanel> createState() => _StreamNetworkPanelState();
+}
+
+class _StreamNetworkPanelState extends State<StreamNetworkPanel> {
+  static final _ipLocation = IpLocationService();
+  StreamNetwork get metrics => widget.metrics;
+  String? _peerIp, _localIp;
+  Future<IpLocation?>? _peerLocation, _localLocation;
+  bool _localFromRendezvous = false;
+  InternetAddressType? _localHttpsFamily;
+
+  @override
+  void initState() {
+    super.initState();
+    _lookUpEndpoints();
+  }
+
+  @override
+  void didUpdateWidget(StreamNetworkPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final previous = oldWidget.metrics;
+    if (metrics.endpoint != previous.endpoint ||
+        metrics.route != previous.route ||
+        metrics.localIp != previous.localIp ||
+        metrics.observedLocalIp != previous.observedLocalIp) {
+      _lookUpEndpoints();
+    }
+  }
+
+  void _lookUpEndpoints() {
+    final service = widget.ipLocationService ?? _ipLocation;
+    final peerIp = endpointIp(metrics.endpoint);
+    final peer = peerIp == null ? null : publicIp(peerIp);
+    if (_peerIp != peerIp) {
+      _peerIp = peerIp;
+      _peerLocation = peer == null ? null : service.lookup(peer.address);
+    }
+
+    final observed = metrics.route.startsWith('wan')
+        ? publicIp(metrics.observedLocalIp)
+        : null;
+    final localIp = observed?.address ?? metrics.localIp;
+    final localPublic = publicIp(localIp);
+    final httpsFamily = localPublic == null ? peer?.type : null;
+    if (_localIp != localIp || _localHttpsFamily != httpsFamily) {
+      _localLocation = localPublic != null
+          ? service.lookup(localPublic.address)
+          : (httpsFamily == null ? null : service.lookupSelf(httpsFamily));
+    }
+    _localIp = localIp;
+    _localFromRendezvous = observed != null;
+    _localHttpsFamily = httpsFamily;
+  }
+
+  Widget _address(
+    BuildContext context,
+    String title,
+    String? ip,
+    Future<IpLocation?>? lookup, {
+    bool showReturnedIp = true,
+  }) {
+    final theme = Theme.of(context);
+    return FutureBuilder<IpLocation?>(
+      key: ValueKey((title, ip, lookup)),
+      future: lookup,
+      builder: (context, result) {
+        final location = result.data;
+        final operator = [
+          ?location?.isp,
+          if (location?.asn case final asn?) 'AS$asn',
+        ].join(' · ');
+        final address = (showReturnedIp ? location?.ip.address : null) ?? ip;
+        final area = lookup == null
+            ? (address == null || address.isEmpty ? '—' : '内网或保留地址')
+            : (result.connectionState == ConnectionState.waiting
+                  ? '查询中…'
+                  : location?.label ?? '归属地不可用');
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: theme.textTheme.labelMedium),
+              Text(
+                address == null || address.isEmpty ? '—' : address,
+                style: theme.textTheme.bodyMedium,
+              ),
+              Text(
+                operator.isEmpty ? area : '$area · $operator',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   String _format(double? value, String unit, [int decimals = 1]) =>
       value == null ? '—' : '${value.toStringAsFixed(decimals)}$unit';
@@ -206,7 +317,7 @@ class StreamNetworkPanel extends StatelessWidget {
                 ),
                 IconButton(
                   tooltip: '关闭网络状态',
-                  onPressed: onClose,
+                  onPressed: widget.onClose,
                   icon: const Icon(Icons.close, size: 18),
                 ),
               ],
@@ -234,13 +345,32 @@ class StreamNetworkPanel extends StatelessWidget {
                       },
                     ),
                   ]),
-                  if (metrics.endpoint.isNotEmpty)
+                  if (metrics.endpoint.isNotEmpty) ...[
+                    const Divider(height: 12),
                     Text(
-                      metrics.endpoint,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: color.onSurfaceVariant,
+                      'P2P 双端 · ip.sb',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: color.primary,
                       ),
                     ),
+                    _address(
+                      context,
+                      _localFromRendezvous
+                          ? '本机 · UDP 引介观测'
+                          : (_localHttpsFamily != null
+                                ? '本机 · HTTPS 出口'
+                                : '本机'),
+                      _localHttpsFamily != null ? null : _localIp,
+                      _localLocation,
+                    ),
+                    _address(
+                      context,
+                      '主机',
+                      metrics.endpoint,
+                      _peerLocation,
+                      showReturnedIp: false,
+                    ),
+                  ],
                   const Divider(height: 12),
                   group('数据收发', [
                     ('接收码率', _format(metrics.mbps, ' Mbps')),

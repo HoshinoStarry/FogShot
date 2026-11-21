@@ -12,6 +12,7 @@ import 'account_panel.dart';
 import 'client.dart';
 import 'desktop_settings.dart';
 import 'desktop_settings_dialog.dart';
+import 'device_name.dart';
 import 'lobby.dart';
 import 'stream_view.dart';
 
@@ -86,10 +87,12 @@ class _SessionPageState extends State<SessionPage>
   String _lastAddress = '';
   bool _restoringAccount = false;
   bool _requestingRemote = false;
+  String? _remoteError;
   int _connectionRequest = 0;
   DesktopSettings _settings = DesktopSettings.defaults();
   String _attemptAddress = '';
   String _attemptPcId = '';
+  String _attemptPcAccountId = '';
   int _retries = 0;
   bool _shouldReconnect = false;
   Future<void> _settingsWrites = Future.value();
@@ -113,8 +116,10 @@ class _SessionPageState extends State<SessionPage>
   Future<void> _start() async {
     try {
       final settings = await DesktopSettings.load();
+      final deviceName = await currentDeviceName();
       if (_shuttingDown) return;
-      final client = await Client.open();
+      _account.setDeviceName(deviceName);
+      final client = await Client.open(deviceName: deviceName);
       if (_shuttingDown) {
         client.dispose();
         return;
@@ -179,6 +184,7 @@ class _SessionPageState extends State<SessionPage>
         _settings = _settings.copyWith(
           lastAddress: _attemptAddress,
           lastPcId: _attemptPcId,
+          lastPcAccountId: _attemptPcAccountId,
         );
         unawaited(_persistSettings());
       }
@@ -194,6 +200,9 @@ class _SessionPageState extends State<SessionPage>
 
   Future<void> _restoreAccount(String deviceId) async {
     await _account.restore(deviceId);
+    final accountId = _settings.lastPcAccountId.isEmpty
+        ? _account.activeAccountId
+        : _settings.lastPcAccountId;
     if (mounted &&
         !_shuttingDown &&
         _settings.autoConnect &&
@@ -201,16 +210,19 @@ class _SessionPageState extends State<SessionPage>
         _connectionRequest == 0 &&
         !_state.connected &&
         !_state.pending &&
-        _account.signedIn) {
-      await _connectAccountHost(_settings.lastPcId);
+        accountId != null &&
+        _account.accounts.any((account) => account.id == accountId)) {
+      await _connectAccountHost(accountId, _settings.lastPcId);
     }
   }
 
   void _connectAddress(String address) {
     ++_connectionRequest;
     _attemptPcId = '';
+    _attemptPcAccountId = '';
     _attemptAddress = address;
     _lastAddress = address;
+    if (_remoteError != null) setState(() => _remoteError = null);
     _client?.connect(address);
   }
 
@@ -222,25 +234,34 @@ class _SessionPageState extends State<SessionPage>
         return;
       }
       if (_attemptAddress.isNotEmpty) _connectAddress(_attemptAddress);
-      if (_attemptPcId.isNotEmpty && _account.signedIn) {
-        unawaited(_connectAccountHost(_attemptPcId));
+      if (_attemptPcId.isNotEmpty &&
+          _account.accounts.any(
+            (account) => account.id == _attemptPcAccountId,
+          )) {
+        unawaited(_connectAccountHost(_attemptPcAccountId, _attemptPcId));
       }
     });
   }
 
-  Future<void> _connectAccountHost(String id) async {
+  Future<void> _connectAccountHost(String accountId, String id) async {
     final request = ++_connectionRequest;
     _attemptAddress = '';
     _attemptPcId = id;
-    setState(() => _requestingRemote = true);
+    _attemptPcAccountId = accountId;
+    setState(() {
+      _requestingRemote = true;
+      _remoteError = null;
+    });
     try {
-      final offer = await _account.requestConnection(id);
+      final offer = await _account.requestConnectionForAccount(accountId, id);
       if (mounted && request == _connectionRequest) {
         _client?.connectRemote(offer);
       }
-    } on AccountException {
-      // The account panel already renders the HTTP error from the controller.
-      if (_shouldReconnect) _scheduleReconnect();
+    } on AccountException catch (error) {
+      if (mounted && request == _connectionRequest) {
+        _remoteError = error.message;
+        if (_shouldReconnect) _scheduleReconnect();
+      }
     } finally {
       if (mounted && request == _connectionRequest) {
         setState(() => _requestingRemote = false);
@@ -291,6 +312,8 @@ class _SessionPageState extends State<SessionPage>
     listenable: _account,
     builder: (_, _) => AccountPanel(
       server: _account.server,
+      accounts: _account.accounts,
+      activeAccountId: _account.activeAccountId,
       enabled: _state.deviceId.isNotEmpty && !_state.pending,
       signedIn: _account.signedIn,
       working:
@@ -313,7 +336,7 @@ class _SessionPageState extends State<SessionPage>
           email: email,
           password: password,
         );
-        return _account.signedIn ? null : _account.error ?? '登录已取消。';
+        return _account.error ?? (_account.signedIn ? null : '登录已取消。');
       },
       onCancel: _account.cancelSignIn,
       onSignOut: () {
@@ -322,8 +345,24 @@ class _SessionPageState extends State<SessionPage>
       },
       onRefresh: () => unawaited(_account.refreshHosts()),
       onConnect: (id) {
+        if (_account.activeAccountId case final accountId?) {
+          _clearReconnect();
+          unawaited(_connectAccountHost(accountId, id));
+        }
+      },
+      onConnectAccount: (accountId, id) {
         _clearReconnect();
-        unawaited(_connectAccountHost(id));
+        unawaited(_connectAccountHost(accountId, id));
+      },
+      onSelectAccount: (accountId) =>
+          unawaited(_account.selectAccount(accountId)),
+      onRemoveAccount: (accountId) async {
+        if (_attemptPcAccountId == accountId &&
+            (_state.pending || _requestingRemote)) {
+          _cancelConnection();
+        }
+        await _account.removeAccount(accountId);
+        return _account.error;
       },
       onServerChanged: (address) async {
         await _account.changeServer(address);
@@ -434,22 +473,51 @@ class _SessionPageState extends State<SessionPage>
         state: _state,
         images: _images,
         brightness: _settings.brightness,
+        playbackVolume: _settings.playbackVolume,
+        onVolumeChanged: (value) {
+          setState(() => _settings = _settings.copyWith(playbackVolume: value));
+          client.volume(value);
+        },
+        onVolumeChangeEnd: (_) => unawaited(_persistSettings()),
         onSettings: _editSettings,
       );
     }
-    return Lobby(
-      state: _state,
-      initialAddress: _lastAddress,
-      requestingRemote: _requestingRemote,
-      account: _accountSection(),
-      onSettings: _editSettings,
-      onConnect: client == null
-          ? null
-          : (address) {
-              _clearReconnect();
-              _connectAddress(address);
-            },
-      onCancel: _cancelConnection,
+    return ListenableBuilder(
+      listenable: _account,
+      builder: (context, accountPanel) => Lobby(
+        state: _state,
+        initialAddress: _lastAddress,
+        requestingRemote: _requestingRemote,
+        remoteError: _remoteError,
+        account: accountPanel,
+        remoteDevices: [
+          for (final account in _account.accounts)
+            for (final host in account.hosts)
+              (
+                accountId: account.id,
+                account: account.name.isEmpty ? account.email : account.name,
+                id: host.id,
+                name: host.name,
+                online: host.online,
+                busy: host.busy,
+              ),
+        ],
+        onConnectAccount: client == null
+            ? null
+            : (device) {
+                _clearReconnect();
+                unawaited(_connectAccountHost(device.accountId, device.id));
+              },
+        onSettings: _editSettings,
+        onConnect: client == null
+            ? null
+            : (address) {
+                _clearReconnect();
+                _connectAddress(address);
+              },
+        onCancel: _cancelConnection,
+      ),
+      child: _accountSection(),
     );
   }
 }

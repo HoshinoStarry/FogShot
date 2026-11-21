@@ -75,6 +75,7 @@ class DesktopSettings {
     this.autoConnect = false,
     this.lastAddress = '',
     this.lastPcId = '',
+    this.lastPcAccountId = '',
   });
 
   static const fileName = 'desktop_settings.json';
@@ -100,6 +101,7 @@ class DesktopSettings {
   final bool autoConnect;
   final String lastAddress;
   final String lastPcId;
+  final String lastPcAccountId;
 
   DesktopDecodePreset get decodePreset =>
       DesktopDecodePreset.fromDimensions(maxDecodeWidth, maxDecodeHeight);
@@ -182,6 +184,8 @@ class DesktopSettings {
       autoConnect: _readBool(decoded['autoConnect'], defaults.autoConnect),
       lastAddress: _readString(decoded['lastAddress']) ?? defaults.lastAddress,
       lastPcId: _readString(decoded['lastPcId']) ?? defaults.lastPcId,
+      lastPcAccountId:
+          _readString(decoded['lastPcAccountId']) ?? defaults.lastPcAccountId,
     );
   }
 
@@ -232,6 +236,7 @@ class DesktopSettings {
     'autoConnect': autoConnect,
     'lastAddress': lastAddress,
     'lastPcId': lastPcId,
+    'lastPcAccountId': lastPcAccountId,
   };
 
   DesktopSettings copyWith({
@@ -249,6 +254,7 @@ class DesktopSettings {
     bool? autoConnect,
     String? lastAddress,
     String? lastPcId,
+    String? lastPcAccountId,
   }) => DesktopSettings(
     frameRate: frameRate ?? this.frameRate,
     desktopBitrateMbps: desktopBitrateMbps ?? this.desktopBitrateMbps,
@@ -264,6 +270,7 @@ class DesktopSettings {
     autoConnect: autoConnect ?? this.autoConnect,
     lastAddress: lastAddress ?? this.lastAddress,
     lastPcId: lastPcId ?? this.lastPcId,
+    lastPcAccountId: lastPcAccountId ?? this.lastPcAccountId,
   );
 
   static Future<String> _defaultPath() async {

@@ -32,6 +32,21 @@ external Pointer<NativeClient> rcd_create(
   int mobile,
 );
 
+@Native<
+  Pointer<NativeClient> Function(
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Int32,
+  )
+>()
+external Pointer<NativeClient> rcd_create_named(
+  Pointer<Utf8> profile,
+  Pointer<Utf8> platform,
+  Pointer<Utf8> deviceName,
+  int mobile,
+);
+
 @Native<Void Function(Pointer<NativeClient>)>()
 external void rcd_destroy(Pointer<NativeClient> client);
 

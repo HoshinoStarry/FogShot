@@ -1,9 +1,11 @@
 import Cocoa
 import FlutterMacOS
 import AVFoundation
+import SystemConfiguration
 
 class MainFlutterWindow: NSWindow {
   private var microphoneChannel: FlutterMethodChannel?
+  private var deviceNameChannel: FlutterMethodChannel?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -25,7 +27,27 @@ class MainFlutterWindow: NSWindow {
     }
     microphoneChannel = channel
 
+    let deviceNameChannel = FlutterMethodChannel(
+      name: "host.hoshino.fogshot/device_name",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    deviceNameChannel.setMethodCallHandler { call, result in
+      guard call.method == "currentDeviceName" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(self.currentComputerName())
+    }
+    self.deviceNameChannel = deviceNameChannel
+
     super.awakeFromNib()
+  }
+
+  private func currentComputerName() -> String {
+    if let computerName = SCDynamicStoreCopyComputerName(nil, nil)?.takeRetainedValue() as String? {
+      return computerName
+    }
+    return Host.current().localizedName ?? ProcessInfo.processInfo.hostName
   }
 
   private func requestMicrophonePermission(result: @escaping FlutterResult) {

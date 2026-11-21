@@ -9,6 +9,8 @@ void main() {
   testWidgets('validates the direct address before starting a session', (
     tester,
   ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     String? address;
     await tester.pumpWidget(
       MaterialApp(
@@ -19,6 +21,7 @@ void main() {
         ),
       ),
     );
+    expect(find.text('附近主机'), findsNothing);
     await tester.enterText(find.byType(TextFormField), '192.168.1.400');
     await tester.tap(find.text('连接'));
     await tester.pump();
@@ -91,5 +94,45 @@ void main() {
     expect(windowsVirtualKey(PhysicalKeyboardKey.arrowRight), 0x27);
     expect(windowsVirtualKey(PhysicalKeyboardKey.controlRight), 0xa3);
     expect(windowsVirtualKey(PhysicalKeyboardKey.audioVolumeUp), isNull);
+  });
+
+  testWidgets('shows devices from multiple accounts and uses the row account', (
+    tester,
+  ) async {
+    LobbyAccountDevice? selected;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Lobby(
+          state: const ClientState(discover: false),
+          onConnect: (_) {},
+          onCancel: () {},
+          remoteDevices: const [
+            (
+              accountId: 'a',
+              account: '工作账号',
+              id: 'same-id',
+              name: '办公室',
+              online: true,
+              busy: false,
+            ),
+            (
+              accountId: 'b',
+              account: '个人账号',
+              id: 'same-id',
+              name: '家用电脑',
+              online: true,
+              busy: false,
+            ),
+          ],
+          onConnectAccount: (device) => selected = device,
+        ),
+      ),
+    );
+    expect(find.text('办公室'), findsOneWidget);
+    expect(find.text('工作账号'), findsOneWidget);
+    expect(find.text('家用电脑'), findsOneWidget);
+    await tester.tap(find.text('家用电脑'));
+    expect(selected?.accountId, 'b');
+    expect(selected?.id, 'same-id');
   });
 }

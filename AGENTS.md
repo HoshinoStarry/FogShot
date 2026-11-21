@@ -6,9 +6,9 @@ FogShot 是普通显示器和触屏设备使用的 RinCast 客户端。所有平
 | --- | --- |
 | `lib/main.dart`、`lib/lobby.dart`、`lib/stream_view.dart` | Flutter 会话生命周期、连接界面、画面与输入 |
 | `lib/input.dart` | Flutter 物理按键到协议虚拟键的映射 |
-| `lib/virtual_keyboard.dart`、`lib/stream_network.dart` | 屏幕键盘与实时连接、逐屏统计 |
-| `lib/desktop_settings*.dart`、`lib/microphone_permission.dart` | 串流偏好、重连设置与麦克风授权 |
-| `lib/account.dart`、`lib/account_panel.dart` | RinCast 设备码与邮箱密码登录、系统安全存储、账号主机和跨网络连接入口 |
+| `lib/virtual_keyboard.dart`、`lib/stream_network.dart`、`lib/ip_location.dart` | 屏幕键盘、实时串流统计与 P2P 地址归属地 |
+| `lib/desktop_settings*.dart`、`lib/microphone_permission.dart`、`lib/device_name.dart` | 串流偏好、重连设置、麦克风授权与系统设备名称 |
+| `lib/account.dart`、`lib/account_panel.dart` | RinCast 登录、多账号凭据存储、主机列表与跨网连接 |
 | `lib/client.dart`、`lib/native_bindings.dart` | Dart 客户端、FFI 类型、帧生命周期 |
 | `src/bridge.h`、`src/bridge.cpp` | C ABI、会话工作线程、设备身份文件、最新画面与状态快照 |
 | `src/session.*` | 局域网发现、账号引介、UDP 直连选路与认证、控制消息、视频组帧和输入 |

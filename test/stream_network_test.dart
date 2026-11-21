@@ -22,16 +22,30 @@ const _connectedState = ClientState(
   displays: [
     (id: 'display-a', name: 'Wide desktop monitor', width: 2560, height: 1440),
   ],
-  network: StreamNetwork(route: 'lan4'),
+  network: StreamNetwork(
+    route: 'lan4',
+    rttMs: 24.3,
+    lossPercent: 0.2,
+    jitterMs: 2.4,
+  ),
 );
 
-Widget _streamView([Client? client]) => MaterialApp(
+Widget _streamView({
+  Client? client,
+  ClientState? state,
+  double playbackVolume = 1,
+  ValueChanged<double>? onVolumeChanged,
+  ValueChanged<double>? onVolumeChangeEnd,
+}) => MaterialApp(
   home: StreamView(
     client: client ?? _NoopClient(),
-    state: _connectedState,
+    state: state ?? _connectedState,
     images: const {},
     brightness: 1,
     onSettings: () {},
+    playbackVolume: playbackVolume,
+    onVolumeChanged: onVolumeChanged,
+    onVolumeChangeEnd: onVolumeChangeEnd,
   ),
 );
 
@@ -55,6 +69,10 @@ void main() {
     final toolbarBounds = tester.getRect(toolbar);
     expect(toolbarBounds.center.dx, closeTo(videoBounds.center.dx, 0.01));
     expect(toolbarBounds.top, greaterThan(videoBounds.top));
+    expect(toolbarBounds.width, lessThan(videoBounds.width - 80));
+    final displayTitle = tester.widget<Text>(find.text('Wide desktop monitor'));
+    expect(displayTitle.maxLines, 1);
+    expect(displayTitle.overflow, TextOverflow.ellipsis);
 
     await tester.pump(const Duration(milliseconds: 2999));
     expect(toolbar, findsOneWidget);
@@ -123,23 +141,134 @@ void main() {
     _setSurface(tester, const Size(280, 450));
     await tester.pumpWidget(_streamView());
     expect(tester.takeException(), isNull);
-    await tester.tap(find.widgetWithText(OutlinedButton, '网络'));
+    final networkButton = find.byKey(const ValueKey('stream-network-button'));
+    expect(
+      find.descendant(
+        of: networkButton,
+        matching: find.byIcon(Icons.network_check),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: networkButton, matching: find.text('24 ms')),
+      findsOneWidget,
+    );
+    expect(find.text('局域网 IPv4'), findsNothing);
+    await tester.tap(networkButton);
     await tester.pump();
     expect(find.text('网络状态'), findsOneWidget);
+    expect(find.text('局域网 IPv4'), findsOneWidget);
     expect(tester.getSize(find.byType(StreamNetworkPanel)).width, 262);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('toolbar mutes and resumes playback explicitly', (tester) async {
-    _setSurface(tester, const Size(800, 450));
-    final client = _NoopClient();
-    await tester.pumpWidget(_streamView(client));
-    await tester.tap(find.byTooltip('静音'));
-    await tester.pump();
-    expect(client.muteCommands, [true]);
-    await tester.tap(find.byTooltip('取消静音'));
-    await tester.pump();
-    expect(client.muteCommands, [true, false]);
+  testWidgets('network badge is neutral when quality metrics are unknown', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(640, 360));
+    await tester.pumpWidget(
+      _streamView(
+        state: const ClientState(
+          phase: Phase.connected,
+          display: 'display-a',
+          displays: [
+            (
+              id: 'display-a',
+              name: 'Wide desktop monitor',
+              width: 2560,
+              height: 1440,
+            ),
+          ],
+          network: StreamNetwork(route: 'lan4'),
+        ),
+      ),
+    );
+    final networkButton = find.byKey(const ValueKey('stream-network-button'));
+    expect(
+      find.descendant(
+        of: networkButton,
+        matching: find.byIcon(Icons.help_outline),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: networkButton, matching: find.text('— ms')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'toolbar volume popover adjusts playback and mutes independently',
+    (tester) async {
+      _setSurface(tester, const Size(800, 450));
+      final client = _NoopClient();
+      final changes = <double>[];
+      final ends = <double>[];
+      await tester.pumpWidget(
+        _streamView(
+          client: client,
+          playbackVolume: 0.4,
+          onVolumeChanged: changes.add,
+          onVolumeChangeEnd: ends.add,
+        ),
+      );
+
+      await tester.tap(find.byTooltip('音量'));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('stream-volume-popover')),
+        findsOneWidget,
+      );
+      expect(find.text('40%'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('静音'));
+      await tester.pump();
+      expect(client.muteCommands, [true]);
+      await tester.tap(find.byTooltip('取消静音'));
+      await tester.pump();
+      expect(client.muteCommands, [true, false]);
+
+      await tester.drag(
+        find.byKey(const ValueKey('stream-volume-slider')),
+        const Offset(70, 0),
+      );
+      await tester.pump();
+      expect(changes, isNotEmpty);
+      expect(ends, hasLength(1));
+      expect(ends.single, changes.last);
+      expect(find.text('${(changes.last * 100).round()}%'), findsOneWidget);
+      expect(client.muteCommands, [true, false]);
+
+      await tester.pump(const Duration(seconds: 4));
+      expect(find.byKey(const ValueKey('stream-toolbar')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('stream-volume-popover')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byTooltip('关闭音量调节'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.byKey(const ValueKey('stream-toolbar')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('compact overflow opens the same volume popover', (tester) async {
+    _setSurface(tester, const Size(280, 450));
+    await tester.pumpWidget(_streamView(playbackVolume: 0.7));
+
+    await tester.tap(find.byTooltip('更多串流操作'));
+    await tester.pumpAndSettle();
+    expect(find.text('音量 · 70%'), findsOneWidget);
+    expect(find.text('静音'), findsOneWidget);
+
+    await tester.tap(find.text('音量 · 70%'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('stream-volume-popover')), findsOneWidget);
+    expect(find.text('70%'), findsOneWidget);
+    expect(find.byTooltip('静音'), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -148,7 +277,7 @@ void main() {
   ) async {
     _setSurface(tester, const Size(900, 300));
     await tester.pumpWidget(_streamView());
-    await tester.tap(find.byType(OutlinedButton));
+    await tester.tap(find.byKey(const ValueKey('stream-network-button')));
     await tester.pump();
 
     final panel = find.byType(StreamNetworkPanel);

@@ -64,6 +64,7 @@ void main() {
       autoConnect: true,
       lastAddress: '192.168.1.20:38711',
       lastPcId: 'office-pc',
+      lastPcAccountId: 'work-account',
     );
 
     await settings.save(path: path);
@@ -82,6 +83,7 @@ void main() {
     expect(restored.autoConnect, isTrue);
     expect(restored.lastAddress, settings.lastAddress);
     expect(restored.lastPcId, settings.lastPcId);
+    expect(restored.lastPcAccountId, settings.lastPcAccountId);
   });
 
   testWidgets('settings dialog works in a narrow viewport', (tester) async {
@@ -102,6 +104,7 @@ void main() {
                       preferredCodec: VideoCodecPreference.hevc,
                       lastAddress: '10.0.0.5:38711',
                       lastPcId: 'home',
+                      lastPcAccountId: 'personal-account',
                     ),
                     supportedCodecs: const {VideoCodecPreference.hevc},
                   );
@@ -131,6 +134,7 @@ void main() {
     expect(result?.preferredCodec, VideoCodecPreference.hevc);
     expect(result?.lastAddress, '10.0.0.5:38711');
     expect(result?.lastPcId, 'home');
+    expect(result?.lastPcAccountId, 'personal-account');
     expect(tester.takeException(), isNull);
   });
 

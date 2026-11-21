@@ -19,6 +19,9 @@ class StreamView extends StatefulWidget {
     required this.images,
     required this.brightness,
     required this.onSettings,
+    this.playbackVolume = 1,
+    this.onVolumeChanged,
+    this.onVolumeChangeEnd,
   });
 
   final Client client;
@@ -26,6 +29,9 @@ class StreamView extends StatefulWidget {
   final Map<int, ui.Image> images;
   final double brightness;
   final VoidCallback onSettings;
+  final double playbackVolume;
+  final ValueChanged<double>? onVolumeChanged;
+  final ValueChanged<double>? onVolumeChangeEnd;
 
   @override
   State<StreamView> createState() => _StreamViewState();
@@ -54,6 +60,8 @@ class _StreamViewState extends State<StreamView> {
   bool _virtualKeyboard = false;
   bool _requestingMic = false;
   bool _menuOpen = false;
+  bool _volumeOpen = false;
+  late double _volume;
   Timer? _hideTimer;
 
   Client get client => widget.client;
@@ -61,7 +69,16 @@ class _StreamViewState extends State<StreamView> {
   @override
   void initState() {
     super.initState();
+    _volume = widget.playbackVolume.clamp(0.0, 1.0).toDouble();
     _scheduleIdleHide();
+  }
+
+  @override
+  void didUpdateWidget(StreamView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.playbackVolume != widget.playbackVolume) {
+      _volume = widget.playbackVolume.clamp(0.0, 1.0).toDouble();
+    }
   }
 
   @override
@@ -80,6 +97,7 @@ class _StreamViewState extends State<StreamView> {
         _compose ||
         _virtualKeyboard ||
         _showNetwork ||
+        _volumeOpen ||
         _requestingMic) {
       return;
     }
@@ -90,6 +108,7 @@ class _StreamViewState extends State<StreamView> {
           _compose ||
           _virtualKeyboard ||
           _showNetwork ||
+          _volumeOpen ||
           _requestingMic) {
         return;
       }
@@ -115,6 +134,7 @@ class _StreamViewState extends State<StreamView> {
       _compose = false;
       _showNetwork = false;
       _virtualKeyboard = false;
+      _volumeOpen = false;
     });
   }
 
@@ -126,6 +146,25 @@ class _StreamViewState extends State<StreamView> {
   void _closeMenu() {
     _menuOpen = false;
     _scheduleIdleHide();
+  }
+
+  void _toggleVolume() {
+    _hideTimer?.cancel();
+    setState(() {
+      _volumeOpen = !_volumeOpen;
+      if (_volumeOpen) _showNetwork = false;
+    });
+    if (!_volumeOpen) _scheduleIdleHide();
+  }
+
+  void _changeVolume(double value) {
+    final next = value.clamp(0.0, 1.0).toDouble();
+    setState(() => _volume = next);
+    widget.onVolumeChanged?.call(next);
+  }
+
+  void _finishVolumeChange(double value) {
+    widget.onVolumeChangeEnd?.call(value.clamp(0.0, 1.0).toDouble());
   }
 
   void _release() {
@@ -236,6 +275,7 @@ class _StreamViewState extends State<StreamView> {
     setState(() {
       _compose = !_compose;
       _virtualKeyboard = false;
+      _volumeOpen = false;
     });
     if (_compose) {
       _hideTimer?.cancel();
@@ -255,6 +295,7 @@ class _StreamViewState extends State<StreamView> {
     setState(() {
       _virtualKeyboard = !_virtualKeyboard;
       _compose = false;
+      _volumeOpen = false;
     });
     if (_virtualKeyboard) {
       _hideTimer?.cancel();
@@ -476,6 +517,84 @@ class _StreamViewState extends State<StreamView> {
     );
   }
 
+  Widget _volumePopover(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = theme.colorScheme;
+    final percent = '${(_volume * 100).round()}%';
+    return Material(
+      key: const ValueKey('stream-volume-popover'),
+      color: palette.surfaceContainerHigh,
+      elevation: 12,
+      borderRadius: BorderRadius.circular(18),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(6, 6, 4, 6),
+        child: Row(
+          children: [
+            _action(
+              context,
+              _muted ? Icons.volume_off_outlined : Icons.volume_up_outlined,
+              _muted ? '取消静音' : '静音',
+              () {
+                setState(() => _muted = !_muted);
+                client.mute(_muted);
+              },
+              color: _muted ? palette.error : palette.primary,
+            ),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Text('播放音量', style: theme.textTheme.labelMedium),
+                      const Spacer(),
+                      Text(
+                        percent,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: palette.primary,
+                          fontFeatures: const [ui.FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(
+                    height: 30,
+                    child: SliderTheme(
+                      data: theme.sliderTheme.copyWith(
+                        trackHeight: 3,
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 14,
+                        ),
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 7,
+                        ),
+                      ),
+                      child: Slider(
+                        key: const ValueKey('stream-volume-slider'),
+                        value: _volume,
+                        label: percent,
+                        onChangeStart: (_) => _hideTimer?.cancel(),
+                        onChanged: _changeVolume,
+                        onChangeEnd: _finishVolumeChange,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: '关闭音量调节',
+              visualDensity: VisualDensity.compact,
+              onPressed: _toggleVolume,
+              icon: const Icon(Icons.close, size: 18),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _toolbar(BuildContext context) {
     final state = widget.state;
     final palette = Theme.of(context).colorScheme;
@@ -501,7 +620,49 @@ class _StreamViewState extends State<StreamView> {
           child: LayoutBuilder(
             builder: (context, bounds) {
               final wide = bounds.maxWidth >= 520;
-              final compact = bounds.maxWidth < 340;
+              final compact = bounds.maxWidth < 420;
+              final titleWidth = wide ? 160.0 : (compact ? 50.0 : 112.0);
+              final network = state.network;
+              final rttKnown = network.rttMs != null;
+              final networkKnown =
+                  rttKnown ||
+                  network.lossPercent != null ||
+                  network.jitterMs != null;
+              bool atLeast(double? value, double threshold) =>
+                  value != null && value >= threshold;
+              final networkPoor =
+                  atLeast(network.rttMs, 120) ||
+                  atLeast(network.lossPercent, 2) ||
+                  atLeast(network.jitterMs, 20);
+              final networkFair =
+                  !networkPoor &&
+                  (atLeast(network.rttMs, 60) ||
+                      atLeast(network.lossPercent, 0.5) ||
+                      atLeast(network.jitterMs, 10));
+              final networkIcon = !networkKnown
+                  ? Icons.help_outline
+                  : networkPoor
+                  ? Icons.signal_wifi_bad
+                  : networkFair
+                  ? Icons.network_ping
+                  : Icons.network_check;
+              final networkColor = !networkKnown
+                  ? palette.onSurfaceVariant
+                  : networkPoor
+                  ? palette.error
+                  : networkFair
+                  ? const Color(0xffe0a83b)
+                  : const Color(0xff4fbd88);
+              final networkQuality = !networkKnown
+                  ? '质量未知'
+                  : networkPoor
+                  ? '网络拥塞'
+                  : networkFair
+                  ? '网络一般'
+                  : '网络流畅';
+              final rttLabel = rttKnown
+                  ? '${network.rttMs!.round()} ms'
+                  : '— ms';
 
               void toggleMute() {
                 setState(() => _muted = !_muted);
@@ -509,6 +670,7 @@ class _StreamViewState extends State<StreamView> {
               }
 
               return Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   if (!compact)
                     _action(
@@ -517,7 +679,8 @@ class _StreamViewState extends State<StreamView> {
                       '隐藏工具栏',
                       _hideControls,
                     ),
-                  Expanded(
+                  SizedBox(
+                    width: titleWidth,
                     child: PopupMenuButton<String>(
                       tooltip: '切换显示器',
                       onOpened: _openMenu,
@@ -551,11 +714,13 @@ class _StreamViewState extends State<StreamView> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(
-                              Icons.desktop_windows_outlined,
-                              size: 17,
-                            ),
-                            const SizedBox(width: 6),
+                            if (!compact) ...[
+                              const Icon(
+                                Icons.desktop_windows_outlined,
+                                size: 17,
+                              ),
+                              const SizedBox(width: 6),
+                            ],
                             Flexible(
                               child: Text(
                                 state.allDisplays
@@ -573,31 +738,40 @@ class _StreamViewState extends State<StreamView> {
                       ),
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: Tooltip(
-                      message: '网络状态 · ${state.network.routeLabel}',
-                      child: OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size(0, 30),
-                          visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          foregroundColor: _showNetwork
-                              ? palette.primary
-                              : palette.onSurface,
-                        ),
-                        onPressed: () {
-                          setState(() => _showNetwork = !_showNetwork);
-                          _scheduleIdleHide();
-                        },
-                        icon: const Icon(Icons.network_check, size: 17),
-                        label: Text(
-                          wide && state.network.rttMs != null
-                              ? '${state.network.routeLabel} · ${state.network.compactLabel}'
-                              : (compact && state.network.rttMs == null
-                                    ? '网络'
-                                    : state.network.compactLabel),
-                        ),
+                  Tooltip(
+                    message:
+                        '$networkQuality · ${network.routeLabel}\n'
+                        'RTT $rttLabel · 丢包 ${network.lossPercent?.toStringAsFixed(2) ?? '—'}%'
+                        ' · 波动 ${network.jitterMs?.toStringAsFixed(1) ?? '—'} ms',
+                    child: OutlinedButton(
+                      key: const ValueKey('stream-network-button'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 30),
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 7),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        foregroundColor: _showNetwork
+                            ? palette.primary
+                            : palette.onSurface,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _showNetwork = !_showNetwork;
+                          if (_showNetwork) _volumeOpen = false;
+                        });
+                        _scheduleIdleHide();
+                      },
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(networkIcon, size: 17, color: networkColor),
+                          const SizedBox(width: 4),
+                          Text(
+                            rttLabel,
+                            maxLines: 1,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -607,6 +781,14 @@ class _StreamViewState extends State<StreamView> {
                     onCanceled: _closeMenu,
                     iconSize: 19,
                     padding: const EdgeInsets.all(6),
+                    style: IconButton.styleFrom(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      minimumSize: const Size(34, 34),
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 34,
+                      minHeight: 34,
+                    ),
                     icon: Icon(
                       Icons.keyboard_outlined,
                       color: _compose || _virtualKeyboard
@@ -635,11 +817,10 @@ class _StreamViewState extends State<StreamView> {
                   if (!compact)
                     _action(
                       context,
-                      _muted
-                          ? Icons.volume_off_outlined
-                          : Icons.volume_up_outlined,
-                      _muted ? '取消静音' : '静音',
-                      toggleMute,
+                      _volumeOpen ? Icons.volume_up : Icons.volume_up_outlined,
+                      '音量',
+                      _toggleVolume,
+                      color: _volumeOpen || _muted ? palette.primary : null,
                     ),
                   if (wide) ...[
                     _action(
@@ -662,6 +843,14 @@ class _StreamViewState extends State<StreamView> {
                       onCanceled: _closeMenu,
                       iconSize: 19,
                       padding: const EdgeInsets.all(6),
+                      style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        minimumSize: const Size(34, 34),
+                      ),
+                      constraints: const BoxConstraints(
+                        minWidth: 34,
+                        minHeight: 34,
+                      ),
                       itemBuilder: (_) => [
                         PopupMenuItem(
                           value: 0,
@@ -671,9 +860,13 @@ class _StreamViewState extends State<StreamView> {
                         if (compact) ...[
                           PopupMenuItem(
                             value: 2,
+                            child: Text('音量 · ${(_volume * 100).round()}%'),
+                          ),
+                          PopupMenuItem(
+                            value: 3,
                             child: Text(_muted ? '取消静音' : '静音'),
                           ),
-                          const PopupMenuItem(value: 3, child: Text('隐藏工具栏')),
+                          const PopupMenuItem(value: 4, child: Text('隐藏工具栏')),
                         ],
                       ],
                       onSelected: (choice) {
@@ -684,20 +877,23 @@ class _StreamViewState extends State<StreamView> {
                           case 1:
                             widget.onSettings();
                           case 2:
-                            toggleMute();
+                            _toggleVolume();
                           case 3:
+                            toggleMute();
+                          case 4:
                             _hideControls();
                         }
                       },
                     ),
                   ],
-                  SizedBox(
-                    height: 19,
-                    child: VerticalDivider(
-                      width: 10,
-                      color: palette.outlineVariant,
+                  if (!compact)
+                    SizedBox(
+                      height: 19,
+                      child: VerticalDivider(
+                        width: 10,
+                        color: palette.outlineVariant,
+                      ),
                     ),
-                  ),
                   _action(context, Icons.link_off, '断开连接', () {
                     _release();
                     client.disconnect();
@@ -802,6 +998,19 @@ class _StreamViewState extends State<StreamView> {
                                 ),
                               ),
                             ),
+                          ),
+                        ),
+                      ),
+                    if (_controls && _volumeOpen)
+                      Positioned(
+                        top: Client.mobile ? 64 : 58,
+                        left: 8,
+                        right: 8,
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 320),
+                            child: _volumePopover(context),
                           ),
                         ),
                       ),
