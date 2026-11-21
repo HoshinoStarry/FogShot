@@ -12,7 +12,7 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 | Linux | x64、ARM64 tar.gz |
 | macOS | x64 与 ARM64 通用 `.app` ZIP |
 | Android | ARMv7、ARM64、x86_64 APK（CI 使用调试签名） |
-| iOS | 未签名 ARM64 真机 `.app`，以及 x64、ARM64 模拟器 `.app` |
+| iOS | 未签名 ARM64 真机 `.app` |
 
 这些是 Flutter 3.50 正式支持的五个平台架构。iOS 真机包需要在 Xcode 签名后安装。[Flutter 平台支持矩阵](https://docs.flutter.dev/reference/supported-platforms)
 

@@ -34,8 +34,6 @@ jobs:
           - {target: linux, arch: arm64, runner: ubuntu-24.04-arm}
           - {target: macos, arch: universal, runner: macos-15}
           - {target: ios-device, arch: arm64, runner: macos-15}
-          - {target: ios-simulator, arch: arm64, runner: macos-15}
-          - {target: ios-simulator, arch: x64, runner: macos-15-intel}
           - {target: android, arch: split-apk, runner: ubuntu-24.04}
 
     defaults:
@@ -71,11 +69,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android build dependencies
+      - name: Set up Android SDK and NDK
         if: matrix.target == 'android'
-        run: |
-          sdkmanager --licenses <<< "$(printf 'y\n%.0s' {1..100})" >/dev/null
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
 
       - name: Resolve locked packages
         run: |
@@ -138,39 +136,26 @@ jobs:
 
       - name: Build unsigned iOS device app
         if: matrix.target == 'ios-device'
-        run: flutter build ios --release --no-pub --no-codesign
-
-      - name: Build iOS Simulator app
-        if: matrix.target == 'ios-simulator'
-        run: flutter build ios --simulator --debug --no-pub
-
-      - name: Verify and package iOS app
-        if: startsWith(matrix.target, 'ios-')
-        env:
-          TARGET: ${{ matrix.target }}
-          TARGET_ARCH: ${{ matrix.arch }}
         run: |
-          sdk=iphoneos
-          if [[ "$TARGET" == ios-simulator ]]; then sdk=iphonesimulator; fi
-          arch="$TARGET_ARCH"
-          if [[ "$arch" == x64 ]]; then arch=x86_64; fi
-          app="$(find "build/ios/$sdk" -maxdepth 1 -name '*.app' -print -quit)"
+          flutter build ios --release --no-pub --no-codesign
+          app="$(find build/ios/iphoneos -maxdepth 1 -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$APP_ID"
           executable="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")"
-          lipo -verify_arch "$arch" "$app/$executable"
+          lipo -verify_arch arm64 "$app/$executable"
           backend="$(find "$app/Frameworks" -type f -name 'rincast_backend' -print -quit)"
-          lipo -verify_arch "$arch" "$backend"
+          lipo -verify_arch arm64 "$backend"
           mkdir -p dist
-          ditto -c -k --keepParent "$app" "dist/FogShot-$TARGET-$TARGET_ARCH.zip"
+          ditto -c -k --keepParent "$app" dist/FogShot-ios-arm64-unsigned.zip
 
       - name: Build Android release APKs by ABI
         if: matrix.target == 'android'
         run: |
           flutter build apk --release --no-pub --split-per-abi --target-platform android-arm,android-arm64,android-x64
           mkdir -p dist
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           for abi in armeabi-v7a arm64-v8a x86_64; do
             apk="build/app/outputs/flutter-apk/app-$abi-release.apk"
-            "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" | grep -F "package: name='$APP_ID'"
+            "$sdk/build-tools/36.0.0/aapt" dump badging "$apk" | grep -F "package: name='$APP_ID'"
             unzip -Z1 "$apk" | grep -Fx "lib/$abi/librincast_backend.so"
             cp "$apk" "dist/FogShot-android-$abi.apk"
           done

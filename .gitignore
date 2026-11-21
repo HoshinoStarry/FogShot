@@ -5,6 +5,7 @@
 /coverage/
 /.vs/
 /.idea/
+*.iml
 /local.properties
 **/local.properties
 **/.gradle/

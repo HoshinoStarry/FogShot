@@ -8,3 +8,8 @@
 4. Windows Flutter Release 包启动后连入该测试实例，窗口实际显示了远端桌面。三个 Flutter 回归测试覆盖了地址、窄屏配对取消和物理键映射。Linux 原生库在 Ubuntu 24.04 WSL 构建通过。
 5. iOS 默认使用手动 IPv4 地址。项目加入本地网络用途说明。macOS 同时声明沙盒的 UDP 客户端和服务器网络权限。
 6. 应用户要求统一应用名 FogShot 与应用标识 `host.hoshino.fogshot`。添加 GitHub Actions 工作流，为 Flutter 支持的桌面、手机及 iOS 模拟器架构分别构建，并检查最终包和原生库的架构。
+
+## 2026-11-22
+
+- 按用户要求移除 CI 的 iOS 模拟器，只保留未签名的 ARM64 真机包。首轮 Linux x64 和 ARM64 构建通过。首轮 Android Runner 缺少 `sdkmanager`，加入显式的 SDK 和 NDK 安装步骤。
+- 首轮 iOS 编译器将 miniaudio 的 AVAudioSession 头文件作为纯 C++ 处理，导致编译失败。将 iOS 的媒体实现交由 Objective-C++ 编译。
