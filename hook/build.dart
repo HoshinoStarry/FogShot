@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
+import 'package:logging/logging.dart';
 import 'package:native_toolchain_cmake/native_toolchain_cmake.dart';
 
 Future<void> main(List<String> args) async {
@@ -21,8 +22,17 @@ Future<void> main(List<String> args) async {
     };
     final source = input.packageRoot;
     final install = input.outputDirectory.resolve('install/');
+    final logger = Logger('FogShot native')..level = Level.ALL;
+    final logs = logger.onRecord.listen(
+      (record) => stderr.writeln(record.message),
+    );
     final dependencies = <String, String>{};
-    for (final name in ['RINCAST', 'RINCAST_OPENH264', 'RINCAST_LIBYUV', 'RINCAST_MINIAUDIO']) {
+    for (final name in [
+      'RINCAST',
+      'RINCAST_OPENH264',
+      'RINCAST_LIBYUV',
+      'RINCAST_MINIAUDIO',
+    ]) {
       final path = input.userDefines.path('${name.toLowerCase()}_source');
       if (path == null) continue;
       dependencies['FETCHCONTENT_SOURCE_DIR_$name'] = path.toFilePath();
@@ -35,13 +45,18 @@ Future<void> main(List<String> args) async {
         'build/native/$platform/${code.targetArchitecture.name}/',
       ),
       targets: const ['install'],
-      defines: {
-        'CMAKE_INSTALL_PREFIX': install.toFilePath(),
-        ...dependencies,
-      },
-      parallelJobs: Platform.numberOfProcessors.clamp(1, 8),
+      defines: {'CMAKE_INSTALL_PREFIX': install.toFilePath(), ...dependencies},
+      parallelJobs: Platform.numberOfProcessors.clamp(
+        1,
+        target == OS.android ? 2 : 8,
+      ),
+      logger: logger,
     );
-    await builder.run(input: input, output: output);
+    try {
+      await builder.run(input: input, output: output, logger: logger);
+    } finally {
+      await logs.cancel();
+    }
     final file = install.resolve(fileName);
     if (!File.fromUri(file).existsSync()) {
       throw StateError('CMake did not install $fileName');
