@@ -44,8 +44,8 @@ class MainFlutterWindow: NSWindow {
   }
 
   private func currentComputerName() -> String {
-    if let computerName = SCDynamicStoreCopyComputerName(nil, nil)?.takeRetainedValue() as String? {
-      return computerName
+    if let computerName = SCDynamicStoreCopyComputerName(nil, nil) {
+      return computerName as String
     }
     return Host.current().localizedName ?? ProcessInfo.processInfo.hostName
   }
