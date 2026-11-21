@@ -17,6 +17,7 @@ class AccountPanel extends StatelessWidget {
     required this.error,
     required this.hosts,
     required this.onSignIn,
+    required this.onPasswordSignIn,
     required this.onCancel,
     required this.onSignOut,
     required this.onRefresh,
@@ -30,6 +31,8 @@ class AccountPanel extends StatelessWidget {
   final Uri? verificationUrl;
   final List<AccountTarget> hosts;
   final VoidCallback onSignIn, onCancel, onSignOut, onRefresh;
+  final Future<String?> Function(String email, String password)
+  onPasswordSignIn;
   final ValueChanged<String> onConnect;
   final Future<String?> Function(String) onServerChanged;
 
@@ -53,6 +56,13 @@ class AccountPanel extends StatelessWidget {
       context: context,
       builder: (context) =>
           _ServerDialog(initial: server.toString(), onSave: onServerChanged),
+    );
+  }
+
+  Future<void> _openPasswordSignIn(BuildContext context) {
+    return showDialog<void>(
+      context: context,
+      builder: (context) => _PasswordSignInDialog(onSignIn: onPasswordSignIn),
     );
   }
 
@@ -164,14 +174,131 @@ class AccountPanel extends StatelessWidget {
               const LinearProgressIndicator(),
               TextButton(onPressed: onCancel, child: const Text('取消')),
             ] else ...[
-              FilledButton.tonal(
-                onPressed: enabled ? onSignIn : null,
-                child: const Text('登录 RinCast'),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.tonal(
+                    onPressed: enabled ? onSignIn : null,
+                    child: const Text('登录 RinCast'),
+                  ),
+                  OutlinedButton(
+                    onPressed: enabled
+                        ? () => _openPasswordSignIn(context)
+                        : null,
+                    child: const Text('邮箱密码登录'),
+                  ),
+                ],
               ),
             ],
           ],
         ),
       ),
+    );
+  }
+}
+
+class _PasswordSignInDialog extends StatefulWidget {
+  const _PasswordSignInDialog({required this.onSignIn});
+
+  final Future<String?> Function(String email, String password) onSignIn;
+
+  @override
+  State<_PasswordSignInDialog> createState() => _PasswordSignInDialogState();
+}
+
+class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
+  final _formKey = GlobalKey<FormState>();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _passwordFocus = FocusNode();
+  String? _error;
+  bool _submitting = false;
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _passwordFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    final error = await widget.onSignIn(_email.text.trim(), _password.text);
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() {
+        _submitting = false;
+        _error = error;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('邮箱密码登录'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextFormField(
+                controller: _email,
+                autofocus: true,
+                enabled: !_submitting,
+                keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(labelText: '邮箱'),
+                validator: (_) => _email.text.trim().isEmpty ? '请输入邮箱。' : null,
+                onFieldSubmitted: (_) => _passwordFocus.requestFocus(),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _password,
+                focusNode: _passwordFocus,
+                enabled: !_submitting,
+                obscureText: true,
+                enableSuggestions: false,
+                autocorrect: false,
+                textInputAction: TextInputAction.done,
+                decoration: const InputDecoration(labelText: '密码'),
+                validator: (_) => _password.text.isEmpty ? '请输入密码。' : null,
+                onFieldSubmitted: (_) {
+                  if (!_submitting) _submit();
+                },
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _submitting ? null : _submit,
+          child: const Text('登录'),
+        ),
+      ],
     );
   }
 }

@@ -10,7 +10,7 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 | --- | --- |
 | Windows | x64、ARM64 便携 ZIP |
 | Linux | x64、ARM64 tar.gz |
-| macOS | x64 与 ARM64 通用 `.app` ZIP |
+| macOS | x64 与 ARM64 通用 DMG 和 `.app` ZIP |
 | Android | ARMv7、ARM64、x86_64 APK（CI 使用调试签名） |
 | iOS | 未签名 ARM64 真机 `.app` |
 
@@ -28,7 +28,7 @@ iOS 上的局域网直连使用手动地址。第一次发起局域网连接时�
 ## 账号与跨网络串流
 
 1. 在主机的 RinCast Streamer 登录账号并允许远程连接。
-2. 在 FogShot 选择「登录 RinCast」，使用浏览器或 Streamer 确认设备码。
+2. 在 FogShot 用设备码授权，或通过「邮箱密码登录」输入 RinCast 的注册邮箱与密码。
 3. 从同一账号下的主机列表选择在线主机。若 Streamer 要求首次配对，按主机提示允许。
 
 默认使用 `https://rincast.com`。自建服务可通过账号卡片右上角的设置按钮配置 HTTPS 地址。登录凭据由系统安全存储保存。跨网络会话由 RinCast 服务交换地址，画面和声音通过客户端与主机建立的 UDP 直连传输。若当前网络无法建立直连，客户端会显示连接失败。[RinCast 账户和引介协议](https://github.com/TheReal-Flo/RinCast/blob/10ebeb207a65fad7ea23ebdca038e59ccff2315b/server/README.md)

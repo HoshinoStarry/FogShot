@@ -175,7 +175,76 @@ class AccountController extends ChangeNotifier {
   }
 
   /// Requests a device code, publishes it, and polls until sign-in finishes.
-  Future<void> signIn(String deviceId) async {
+  Future<void> signIn(String deviceId) => _runSignIn(deviceId, (
+    generation,
+  ) async {
+    final response = await _request(
+      'POST',
+      '/device/code',
+      body: {'deviceId': _deviceId, 'deviceName': deviceName, 'model': _model},
+    );
+    _requireSuccess(response, fallback: '无法获取登录码，请稍后重试。');
+    if (!_signInIsCurrent(generation)) return null;
+
+    final challenge = _DeviceChallenge.fromJson(
+      response.body,
+      receivedAt: _now(),
+      server: _server,
+    );
+    _challenge = challenge;
+    _notify();
+
+    var interval = challenge.interval;
+    while (_signInIsCurrent(generation)) {
+      if (!_now().add(interval).isBefore(challenge.expiresAt)) {
+        throw const AccountException('expired_token', '登录码已过期，请重新获取。');
+      }
+      await _wait(interval);
+      if (!_signInIsCurrent(generation)) return null;
+
+      final poll = await _request(
+        'POST',
+        '/device/token',
+        body: {'deviceCode': challenge.deviceCode},
+      );
+      if (poll.status == HttpStatus.ok) return poll.body;
+
+      final code = _errorCode(poll.body);
+      if (code == 'authorization_pending') continue;
+      if (code == 'slow_down') {
+        interval += const Duration(seconds: 5);
+        continue;
+      }
+      throw _responseException(poll, fallback: '登录失败，请稍后重试。');
+    }
+    return null;
+  });
+
+  /// Exchanges the registered email and password once for RinCast session tokens.
+  Future<void> signInWithPassword(
+    String deviceId, {
+    required String email,
+    required String password,
+  }) => _runSignIn(deviceId, (_) async {
+    final response = await _request(
+      'POST',
+      '/auth/login',
+      body: {
+        'email': email.trim(),
+        'password': password,
+        'deviceKind': 'headset',
+        'deviceId': _deviceId,
+        'deviceName': deviceName,
+      },
+    );
+    _requireSuccess(response, fallback: '无法使用邮箱和密码登录，请稍后重试。');
+    return response.body;
+  });
+
+  Future<void> _runSignIn(
+    String deviceId,
+    Future<Map<String, dynamic>?> Function(int generation) authorize,
+  ) async {
     if (_session != null) {
       _setError('请先退出当前账户。');
       return;
@@ -194,63 +263,18 @@ class AccountController extends ChangeNotifier {
     _notify();
 
     try {
-      final response = await _request(
-        'POST',
-        '/device/code',
-        body: {
-          'deviceId': _deviceId,
-          'deviceName': deviceName,
-          'model': _model,
-        },
+      final tokens = await authorize(generation);
+      if (tokens == null || !_signInIsCurrent(generation)) return;
+      await _acceptTokenResponse(
+        tokens,
+        isCurrent: () => _signInIsCurrent(generation),
       );
-      _requireSuccess(response, fallback: '无法获取登录码，请稍后重试。');
       if (!_signInIsCurrent(generation)) return;
-
-      final challenge = _DeviceChallenge.fromJson(
-        response.body,
-        receivedAt: _now(),
-        server: _server,
-      );
-      _challenge = challenge;
+      _challenge = null;
+      _error = null;
+      _phase = AccountPhase.signedIn;
       _notify();
-
-      var interval = challenge.interval;
-      while (_signInIsCurrent(generation)) {
-        final nextPoll = _now().add(interval);
-        if (!nextPoll.isBefore(challenge.expiresAt)) {
-          throw const AccountException('expired_token', '登录码已过期，请重新获取。');
-        }
-        await _wait(interval);
-        if (!_signInIsCurrent(generation)) return;
-
-        final poll = await _request(
-          'POST',
-          '/device/token',
-          body: {'deviceCode': challenge.deviceCode},
-        );
-        if (!_signInIsCurrent(generation)) return;
-        if (poll.status == HttpStatus.ok) {
-          await _acceptTokenResponse(
-            poll.body,
-            isCurrent: () => _signInIsCurrent(generation),
-          );
-          if (!_signInIsCurrent(generation)) return;
-          _challenge = null;
-          _error = null;
-          _phase = AccountPhase.signedIn;
-          _notify();
-          await refreshHosts();
-          return;
-        }
-
-        final code = _errorCode(poll.body);
-        if (code == 'authorization_pending') continue;
-        if (code == 'slow_down') {
-          interval += const Duration(seconds: 5);
-          continue;
-        }
-        throw _responseException(poll, fallback: '登录失败，请稍后重试。');
-      }
+      await refreshHosts();
     } on AccountException catch (error) {
       if (!_signInIsCurrent(generation)) return;
       _challenge = null;
@@ -621,6 +645,7 @@ class AccountController extends ChangeNotifier {
       'invalid_code' => '登录码无效或已过期。',
       'too_many_headsets' => '此账户连接的设备数量已达上限。',
       'too_many_pcs' => '此账户连接的主机数量已达上限。',
+      'invalid_credentials' => '邮箱或密码不正确。',
       'pc_offline' => '主机已离线，请确认 RinCast Streamer 正在运行。',
       'not_found' => '未找到该主机。',
       'invalid_refresh_token' => '登录已失效，请重新登录。',

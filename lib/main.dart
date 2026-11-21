@@ -197,6 +197,14 @@ class _SessionPageState extends State<SessionPage>
           (id: host.id, name: host.name, online: host.online, busy: host.busy),
       ],
       onSignIn: () => unawaited(_account.signIn(_state.deviceId)),
+      onPasswordSignIn: (email, password) async {
+        await _account.signInWithPassword(
+          _state.deviceId,
+          email: email,
+          password: password,
+        );
+        return _account.signedIn ? null : _account.error ?? '登录已取消。';
+      },
       onCancel: _account.cancelSignIn,
       onSignOut: () {
         _cancelConnection();

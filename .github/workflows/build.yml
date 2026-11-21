@@ -131,8 +131,12 @@ jobs:
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
           backend="$(find "$app/Contents/Frameworks" -type f -name 'rincast_backend' -print -quit)"
           lipo "$backend" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict --verbose=2 "$app"
           mkdir -p dist
           ditto -c -k --keepParent "$app" dist/FogShot-macos-universal.zip
+          staging="$(mktemp -d)"
+          ditto "$app" "$staging/FogShot.app"
+          hdiutil create -quiet -volname FogShot -srcfolder "$staging" -format UDZO dist/FogShot-macos-universal.dmg
 
       - name: Build unsigned iOS device app
         if: matrix.target == 'ios-device'
@@ -171,3 +175,20 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+
+  macos-launch:
+    name: macOS 27 launch from DMG
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: xcode-27
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: FogShot-macos-universal
+          path: dist
+      - name: Smoke-test the exported application
+        run: bash .github/ci/macos-launch-smoke.sh dist/FogShot-macos-universal.dmg
