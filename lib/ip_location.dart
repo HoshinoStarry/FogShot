@@ -235,9 +235,7 @@ String? _text(Object? value) {
 }
 
 Future<String> _fetch(Uri uri, Duration timeout) async {
-  final client = HttpClient()
-    ..connectionTimeout = timeout
-    ..autoUncompress = false;
+  final client = HttpClient()..connectionTimeout = timeout;
   try {
     return await () async {
       final request = await client.getUrl(uri);
