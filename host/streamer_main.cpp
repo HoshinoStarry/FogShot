@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -128,10 +129,15 @@ int main(int argc, char** argv) {
     }
     app.SetUiSink(Emit);
     Emit(app.StateJson().dump());
-    std::jthread ticker([&app](std::stop_token stopped) {
-        while (!stopped.stop_requested()) {
-            std::this_thread::sleep_for(1s);
-            if (!stopped.stop_requested()) app.Tick();
+    std::mutex tickMutex;
+    std::condition_variable tickWake;
+    bool stopping = false;
+    std::thread ticker([&] {
+        std::unique_lock lock(tickMutex);
+        while (!tickWake.wait_for(lock, 1s, [&] { return stopping; })) {
+            lock.unlock();
+            app.Tick();
+            lock.lock();
         }
     });
     for (std::string line; std::getline(std::cin, line);) {
@@ -143,7 +149,11 @@ int main(int argc, char** argv) {
         } catch (const json::exception&) {
         }
     }
-    ticker.request_stop();
+    {
+        const std::lock_guard lock(tickMutex);
+        stopping = true;
+    }
+    tickWake.notify_one();
     ticker.join();
     app.SetUiSink(nullptr);
     app.Shutdown();
