@@ -15,6 +15,15 @@ trap cleanup EXIT
 sw_vers
 mkdir "$mount"
 hdiutil attach -quiet -readonly -nobrowse -mountpoint "$mount" "$1"
+if [[ ! -L "$mount/Applications" ]]; then
+  echo 'The mounted DMG does not contain an Applications symlink.' >&2
+  exit 1
+fi
+applications_target="$(readlink "$mount/Applications")"
+if [[ "$applications_target" != /Applications ]]; then
+  echo "The Applications symlink targets '$applications_target' instead of /Applications." >&2
+  exit 1
+fi
 ditto "$mount/FogShot.app" "$app"
 hdiutil detach "$mount" -quiet
 test -x "$app/Contents/MacOS/FogShot"

@@ -49,3 +49,4 @@
 - Windows x64 内置主机构建、Dart 静态分析、45 项 Flutter 测试及工作流静态检查通过。
 - Windows 隔离回环使用独立主机配置验证首次配对、设备真实名称和单次批准。客户端实际解码 2560×1440 H.264 桌面画面，未保存画面内容。单次批准未写入信任列表，停止共享后客户端收到断开。
 - 提交 `36e925f` 的七项平台构建通过。Windows x64 和 ARM64 便携包检查了主机二进制架构。macOS 27 从 DMG 启动并退出 FogShot，通过 Launch Services 拉起内置主机，验证本机握手、监听和停止。macOS 桌面采集和输入需要完成系统授权后在真机验收。[CI 与产物](https://github.com/HoshinoStarry/FogShot/actions/runs/45129566990)
+- CI 新增发布环节。构建和 macOS 启动检查通过后，`main` 按提交发布预发行版，`v*` 标签发布版本。iOS 真机产物改为未签名 IPA，macOS DMG 增加指向 `/Applications` 的快捷入口，Android 的三个架构继续直接生成 APK。

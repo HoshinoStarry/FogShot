@@ -4,17 +4,21 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 
 ## 自动构建
 
-每次向 `main` 推送、提交 PR、打 `v*` 标签或手动运行 workflow 后，构建包会出现在该次 GitHub Actions 的 **Artifacts** 中。[构建记录](https://github.com/HoshinoStarry/FogShot/actions/workflows/build.yml)
+每次向 `main` 推送、提交 PR、打 `v*` 标签或手动运行 workflow 后，都会生成 GitHub Actions **Artifacts**。[构建记录](https://github.com/HoshinoStarry/FogShot/actions/workflows/build.yml)
 
-| 平台 | 产物 |
+构建和启动检查通过后，`main` 的每个提交会发布为 `build-<12 位提交哈希>` 预发行版，重跑时沿用已发布的版本。`v*` 标签对应正式版本。PR 的构建产物可从 Actions 下载。[下载页面](https://github.com/HoshinoStarry/FogShot/releases)
+
+| 平台 | 发布产物 |
 | --- | --- |
 | Windows | x64、ARM64 便携 ZIP |
 | Linux | x64、ARM64 tar.gz |
-| macOS | x64 与 ARM64 通用 DMG 和 `.app` ZIP |
+| macOS | x64 与 ARM64 通用 DMG |
 | Android | ARMv7、ARM64、x86_64 APK（CI 使用调试签名） |
-| iOS | 未签名 ARM64 真机 `.app` |
+| iOS | 未签名 ARM64 真机 IPA |
 
-这些是 Flutter 3.50 正式支持的五个平台架构。iOS 真机包需要在 Xcode 签名后安装。[Flutter 平台支持矩阵](https://docs.flutter.dev/reference/supported-platforms)
+macOS 的 `.app` ZIP 继续只保留在 Actions Artifacts 中。DMG 包含 `FogShot.app` 和指向 `/Applications` 的 `Applications` 链接。
+
+iOS 真机 IPA 需要签名后安装。[Flutter 平台支持矩阵](https://docs.flutter.dev/reference/supported-platforms)
 
 ## 连接和操作
 
