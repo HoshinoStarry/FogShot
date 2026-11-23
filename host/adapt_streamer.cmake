@@ -18,6 +18,36 @@ replace_streamer_source(app.cpp [=[    SettingsStore::Get().Load();]=] [=[    Se
         s.autoRegisterSteamVrDriver = false;
         s.switchDefaultAudio = false;
     });]=])
+replace_streamer_source(app.cpp
+  [=[{"deviceName", rcs::HeadsetName(hello.model).empty() ? hello.deviceName : rcs::HeadsetName(hello.model)},]=]
+  [=[{"deviceName", hello.deviceName.empty() ? rcs::HeadsetName(hello.model) : hello.deviceName},]=])
+replace_streamer_source(session/client_session.h
+  [=[return name.empty() ? m_hello.deviceName : name;]=]
+  [=[return m_hello.deviceName.empty() ? name : m_hello.deviceName;]=])
+replace_streamer_source(settings.cpp
+  [=[HeadsetName(d.model).empty() ? d.name : HeadsetName(d.model)]=]
+  [=[d.name.empty() ? HeadsetName(d.model) : d.name]=])
+replace_streamer_source(settings.cpp
+  [=[if (!mapped.empty()) td.name = mapped;]=]
+  [=[if (td.name.empty()) td.name = mapped;]=])
+
+# Install one-time approval state before the network thread can observe the approval.
+replace_streamer_source(app.cpp [=[        if (type == "approve")
+            m_server.Approve(id, m.value("remember", true));
+        else
+            m_server.Deny(id);
+        std::lock_guard lock(m_uiMutex);
+        if (type == "approve" && !m.value("remember", true)) m_noRemember.insert(id);
+        m_pendingApproval = nullptr;]=] [=[        const bool remember = m.value("remember", true);
+        {
+            std::lock_guard lock(m_uiMutex);
+            if (type == "approve" && !remember) m_noRemember.insert(id);
+            m_pendingApproval = nullptr;
+        }
+        if (type == "approve")
+            m_server.Approve(id, remember);
+        else
+            m_server.Deny(id);]=])
 
 # An independent profile keeps this host's settings and keys separate from a stock Streamer.
 replace_streamer_source(util.cpp "#include <fstream>" "#include <cstdlib>\n#include <fstream>")
