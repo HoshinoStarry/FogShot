@@ -13,6 +13,8 @@ import 'client.dart';
 import 'desktop_settings.dart';
 import 'desktop_settings_dialog.dart';
 import 'device_name.dart';
+import 'host_controller.dart';
+import 'host_dialog.dart';
 import 'lobby.dart';
 import 'stream_view.dart';
 
@@ -76,6 +78,11 @@ class _SessionPageState extends State<SessionPage>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   Client? _client;
   final _account = AccountController();
+  final _host = HostController();
+  final _hasHost = HostController.available;
+  late final _lobbyChanges = Listenable.merge([_account, _host]);
+  bool _hostDialogOpen = false;
+  String? _announcedApproval;
   ClientState _state = ClientState(discover: !Platform.isIOS);
   final Map<int, ui.Image> _images = {};
   Timer? _poller;
@@ -101,6 +108,7 @@ class _SessionPageState extends State<SessionPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _host.addListener(_notifyHostApproval);
     _ticker = createTicker((_) => unawaited(_updateFrame()));
     _accountPoller = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_account.signedIn &&
@@ -111,6 +119,26 @@ class _SessionPageState extends State<SessionPage>
       }
     });
     unawaited(_start());
+  }
+
+  void _notifyHostApproval() {
+    final prompt = _host.approval;
+    if (prompt?.id == _announcedApproval) return;
+    _announcedApproval = prompt?.id;
+    if (prompt == null || _hostDialogOpen || _shuttingDown) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text('${prompt.name} 请求配对'),
+        action: SnackBarAction(label: '查看', onPressed: _openHost),
+      ),
+    );
+  }
+
+  Future<void> _openHost() async {
+    if (_hostDialogOpen || _shuttingDown) return;
+    _hostDialogOpen = true;
+    await showHostDialog(context, _host);
+    _hostDialogOpen = false;
   }
 
   Future<void> _start() async {
@@ -437,6 +465,7 @@ class _SessionPageState extends State<SessionPage>
   @override
   Future<ui.AppExitResponse> didRequestAppExit() async {
     _shutdown();
+    await _host.stop();
     return ui.AppExitResponse.exit;
   }
 
@@ -450,6 +479,7 @@ class _SessionPageState extends State<SessionPage>
     _ticker.stop();
     _client?.dispose();
     _client = null;
+    unawaited(_host.stop());
   }
 
   @override
@@ -458,6 +488,7 @@ class _SessionPageState extends State<SessionPage>
     _shutdown();
     _ticker.dispose();
     _account.dispose();
+    _host.dispose();
     for (final image in _images.values) {
       image.dispose();
     }
@@ -483,7 +514,7 @@ class _SessionPageState extends State<SessionPage>
       );
     }
     return ListenableBuilder(
-      listenable: _account,
+      listenable: _lobbyChanges,
       builder: (context, accountPanel) => Lobby(
         state: _state,
         initialAddress: _lastAddress,
@@ -509,6 +540,8 @@ class _SessionPageState extends State<SessionPage>
                 unawaited(_connectAccountHost(device.accountId, device.id));
               },
         onSettings: _editSettings,
+        onShareHost: _hasHost ? _openHost : null,
+        sharingHost: _host.phase == SharingPhase.sharing,
         onConnect: client == null
             ? null
             : (address) {

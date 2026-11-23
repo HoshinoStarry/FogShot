@@ -52,6 +52,7 @@ for attempt in {1..10}; do
   if ! kill -0 "$pid" 2>/dev/null; then
     pid=''
     echo 'FogShot exited after a normal quit request.'
+    python3 .github/ci/macos-host-smoke.py "$app/Contents/Helpers/FogShot Host.app"
     exit 0
   fi
   sleep 1

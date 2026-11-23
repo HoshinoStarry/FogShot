@@ -93,8 +93,16 @@ jobs:
           flutter build windows --release --no-pub
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $bundle = "build/windows/$env:TARGET_ARCH/runner/Release"
+          cmake -S host -B build/host -G 'Visual Studio 18 2026' -A $env:TARGET_ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/host --config Release --target rincast-streamer --parallel 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --install build/host --config Release --prefix (Join-Path (Resolve-Path $bundle) 'host')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bundle/host/fogshot-streamer.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $expected = if ($env:TARGET_ARCH -eq 'arm64') { 0xAA64 } else { 0x8664 }
-          foreach ($file in @('fogshot.exe', 'rincast_backend.dll')) {
+          foreach ($file in @('fogshot.exe', 'rincast_backend.dll', 'host/fogshot-streamer.exe')) {
             $data = [IO.File]::ReadAllBytes((Resolve-Path "$bundle/$file").Path)
             $machine = [BitConverter]::ToUInt16($data, [BitConverter]::ToInt32($data, 0x3c) + 4)
             if ($machine -ne $expected) { throw "Unexpected architecture in $file" }
@@ -131,6 +139,18 @@ jobs:
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
           backend="$(find "$app/Contents/Frameworks" -type f -name 'rincast_backend' -print -quit)"
           lipo "$backend" -verify_arch arm64 x86_64
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          cmake -S host -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.3 \
+            -DCURL_INCLUDE_DIR="$sdk/usr/include" -DCURL_LIBRARY="$sdk/usr/lib/libcurl.tbd"
+          cmake --build build/host --target rincast-streamer --parallel 3
+          helper="$app/Contents/Helpers/FogShot Host.app"
+          mkdir -p "$helper/Contents/MacOS"
+          cp host/macos-Info.plist "$helper/Contents/Info.plist"
+          cmake --install build/host --prefix "$PWD/$helper/Contents/MacOS"
+          lipo "$helper/Contents/MacOS/fogshot-streamer" -verify_arch arm64 x86_64
+          codesign --force --sign - "$helper"
+          codesign --force --sign - --preserve-metadata=entitlements "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           mkdir -p dist
           ditto -c -k --keepParent "$app" dist/FogShot-macos-universal.zip

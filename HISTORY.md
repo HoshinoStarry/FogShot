@@ -41,3 +41,9 @@
 - 使用独立的原版 RinCast 服务实测两个账号登录、同时读取两台主机、恢复会话和分别获取连接信息。首轮 macOS 构建设备名称调用未正确处理 Swift 桥接类型，改为使用 Swift 已管理的 `CFString`。
 - 实测 IP.SB 的响应使用 gzip，启用 Dart HTTP 客户端的自动解压后，公网 IPv4 和 IPv6 样本均能通过应用查询解析。
 - 提交 `cc27938` 的七项平台与架构构建均通过，macOS 27.0.1 已从该版 DMG 实际启动并响应系统正常退出请求。[CI 与产物](https://github.com/HoshinoStarry/FogShot/actions/runs/44943870281)
+
+## 2026-11-23
+
+- 在桌面端加入「共享本机」，由 FogShot 控制内置 RinCast Streamer 的启动、停止、配对、设备信任和主机账户。上游 Linux 采集是占位实现，主机入口由可用组件决定。
+- Windows 通过进程管道管理主机。macOS 由系统单独启动同一安装包中的主机组件，并验证本机连接。主机由系统管理录屏和辅助功能授权。
+- Windows x64 内置主机构建、Dart 静态分析、45 项 Flutter 测试及工作流静态检查通过。

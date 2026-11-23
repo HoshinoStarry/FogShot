@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>host.hoshino.fogshot.streamer</string>
+  <key>CFBundleExecutable</key>
+  <string>fogshot-streamer</string>
+  <key>CFBundleName</key>
+  <string>FogShot Host</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.3</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>FogShot Host 需要访问局域网，以便设备连接你正在共享的桌面。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>FogShot Host 会把你正在共享的桌面的系统音频发送到已连接的设备。</string>
+</dict>
+</plist>

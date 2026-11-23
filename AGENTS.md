@@ -1,6 +1,6 @@
 # FogShot 项目说明
 
-FogShot 是普通显示器和触屏设备使用的 RinCast 客户端。所有平台共用 Flutter 界面和原生串流核心。开发时优先用中文，按实际完成情况更新 `HISTORY.md`。
+FogShot 是普通显示器和触屏设备使用的 RinCast 客户端。Windows 和 macOS 桌面包也可以共享本机桌面。所有平台共用 Flutter 界面和原生串流核心。开发时优先用中文，按实际完成情况更新 `HISTORY.md`。
 
 | 路径 | 职责 |
 | --- | --- |
@@ -10,6 +10,7 @@ FogShot 是普通显示器和触屏设备使用的 RinCast 客户端。所有平
 | `lib/desktop_settings*.dart`、`lib/microphone_permission.dart`、`lib/device_name.dart` | 串流偏好、重连设置、麦克风授权与系统设备名称 |
 | `lib/account.dart`、`lib/account_panel.dart` | RinCast 登录、多账号凭据存储、主机列表与跨网连接 |
 | `lib/client.dart`、`lib/native_bindings.dart` | Dart 客户端、FFI 类型、帧生命周期 |
+| `lib/host_controller.dart`、`lib/host_dialog.dart`、`host/` | 桌面共享入口、内置主机生命周期与 RinCast Streamer 构建 |
 | `src/bridge.h`、`src/bridge.cpp` | C ABI、会话工作线程、设备身份文件、最新画面与状态快照 |
 | `src/session.*` | 局域网发现、账号引介、UDP 直连选路与认证、控制消息、视频组帧和输入 |
 | `src/media.*` | 视频解码、颜色转换、Opus 播放与麦克风采集 |

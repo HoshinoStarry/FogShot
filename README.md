@@ -29,6 +29,14 @@ FogShot 是供 **Windows、Linux、macOS、Android、iOS** 使用的桌面串流
 
 iOS 使用局域网单播探测，也可手动输入地址。第一次使用时请允许系统弹出的「本地网络」权限。[Apple 本地网络说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
 
+## 共享本机
+
+Windows 和 macOS 桌面包内置 RinCast Streamer。在主页点「共享本机」和「开始共享」，其他设备可以通过页面列出的局域网地址连接。首次连接需要在本机批准配对。可以仅允许本次连接，也可以记住设备并在共享页撤销信任。停止共享或退出 FogShot 会关闭内置主机。
+
+跨网共享需要在「共享本机」页登录 RinCast 主机账户，并开启「允许跨网连接」。客户端仍通过 RinCast 的 UDP 直连建立串流。
+
+macOS 的内置主机需要 macOS 12.3 或以上及系统的屏幕录制和辅助功能权限。系统声音需要 macOS 13 或以上。Linux、Android 和 iOS 包提供客户端入口。上游 Linux 主机的桌面采集尚未实现。[RinCast macOS 主机说明](https://github.com/TheReal-Flo/RinCast/blob/10ebeb207a65fad7ea23ebdca038e59ccff2315b/pc/mac/README.md) · [Linux 采集实现](https://github.com/TheReal-Flo/RinCast/blob/10ebeb207a65fad7ea23ebdca038e59ccff2315b/pc/streamer/src/platform/linux/desktop_stream_linux.cpp)
+
 ## 账号与跨网络串流
 
 1. 在主机的 RinCast Streamer 登录账号并允许远程连接。
@@ -52,6 +60,8 @@ iOS 使用局域网单播探测，也可手动输入地址。第一次使用时�
 | iOS | macOS 上的 Xcode | `flutter build ios --release --no-codesign` |
 
 真机 iOS 安装需要用自己的 Apple Team 和描述文件签名。可以用 `flutter build ios --simulator` 检查模拟器构建。各平台的实际验证范围见 `HISTORY.md`。
+
+内置主机由 `host/` 的 CMake 项目构建。GitHub Actions 会将它放入 Windows 便携包的 `host/` 目录，或将独立的 `FogShot Host.app` 签入 macOS 安装包。使用源码构建带主机的版本时，按工作流中的对应打包步骤运行。[桌面打包工作流](https://github.com/HoshinoStarry/FogShot/blob/main/.github/workflows/build.yml)
 
 开发检查使用 `flutter analyze` 和 `flutter test`。桌面端可传入 `--connect <IPv4[:port]>` 直接打开会话。可以用 `cmake -S . -B build/native`、`cmake --build build/native --config Release` 单独构建原生后端。
 

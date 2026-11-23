@@ -26,6 +26,8 @@ class Lobby extends StatefulWidget {
     this.requestingRemote = false,
     this.remoteError,
     this.onSettings,
+    this.onShareHost,
+    this.sharingHost = false,
   });
 
   final ClientState state;
@@ -38,6 +40,8 @@ class Lobby extends StatefulWidget {
   final bool requestingRemote;
   final String? remoteError;
   final VoidCallback? onSettings;
+  final VoidCallback? onShareHost;
+  final bool sharingHost;
 
   @override
   State<Lobby> createState() => _LobbyState();
@@ -205,6 +209,25 @@ class _LobbyState extends State<Lobby> {
             ],
           ),
         ),
+        if (widget.onShareHost case final openHost?)
+          if (compact)
+            _HeaderAction(
+              tooltip: widget.sharingHost ? '管理本机共享' : '共享本机',
+              onPressed: openHost,
+              icon: widget.sharingHost
+                  ? Icons.cast_connected_rounded
+                  : Icons.cast_rounded,
+            )
+          else
+            TextButton.icon(
+              onPressed: openHost,
+              icon: Icon(
+                widget.sharingHost
+                    ? Icons.cast_connected_rounded
+                    : Icons.cast_rounded,
+              ),
+              label: Text(widget.sharingHost ? '管理本机共享' : '共享本机'),
+            ),
         if (widget.account != null)
           _HeaderAction(
             tooltip: 'RinCast 账户',
